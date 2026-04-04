@@ -1,0 +1,9 @@
+# Ignore cache files
+data/cache/
+__pycache__/
+
+# Optional: ignore all csv outputs
+*.csv
+
+# Or more selectively:
+data/*.csv
