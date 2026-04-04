@@ -5,5 +5,3 @@ __pycache__/
 # Optional: ignore all csv outputs
 *.csv
 
-# Or more selectively:
-data/*.csv
