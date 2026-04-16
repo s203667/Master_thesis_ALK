@@ -21,6 +21,7 @@ def load_csv_data(file_name: str, header: int = 0, sep: str = ',', decimal: str 
     return df
 
 
+
 # def load_json_data(file_name: str):
 #     """
 #     Load a JSON file into a pandas DataFrame.

@@ -14,7 +14,7 @@ class DataPreparationCSV:
                  wind_file_name: str):
         
         self.wind_file_name = wind_file_name
-        #self.el_price_file_name = el_price_file_name
+        self.el_price_file_name = el_price_file_name
         self.start_date = start_date
         self.end_date = end_date
         
@@ -88,19 +88,55 @@ class DataPreparationCSV:
 
         # --- SAVE CACHE --- #
         data_15min.to_csv(cache_file)  # <<< REWRITE >>>
-        print("Cache saved!")  # <<< REWRITE >>>
+        print("Cache saved")  # <<< REWRITE >>>
 
 
         return data_15min.loc[self.start_date:self.end_date]
 
     
-    
+    def prepare_el_price_data(self):
+        #cache
+        BASE_DIR = os.path.dirname(os.path.abspath(__file__))  # 
+        cache_dir = os.path.abspath(os.path.join(BASE_DIR, "..", "data", "cache"))  # 
+        os.makedirs(cache_dir, exist_ok=True)  #
+        cache_file = os.path.join(cache_dir, "el_price_15min_cached.csv")  #
+
+        # --- LOAD CACHE IF EXISTS --- #
+        if os.path.exists(cache_file):  #
+            print("Loading cached electricity price data...")  #
+            df = pd.read_csv(cache_file, parse_dates=["time"], index_col="time")  #
+            return df.loc[self.start_date:self.end_date]  #
+        
+        # --- PROCESS RAW DATA --- #
+        df_el_price = load_csv_data(self.el_price_file_name, sep=";", decimal=",")  #
+        df_el_price["time"] = pd.to_datetime(df_el_price["HourDK"], format="%Y-%m-%d %H:%M:%S")  #
+        df_el_price.set_index("time", inplace=True)  #
+        df_el_price = df_el_price[~df_el_price.index.duplicated(keep='first')]  # Remove duplicates
+        df_el_price.sort_index(inplace=True)  #
+
+        # Select the price column (using EUR for consistency)
+        df_el_price = df_el_price[["SpotPriceEUR"]].rename(columns={"SpotPriceEUR": "el_price[EUR/MWh]"})  #
+
+        # Resample to 15-minute intervals by forward filling the hourly prices
+        df_el_15min = df_el_price.resample("15min").ffill()  #
+
+        # --- SAVE CACHE --- #
+        df_el_15min.to_csv(cache_file)  #
+        print("Electricity price cache saved!")  #
+
+        return df_el_15min.loc[self.start_date:self.end_date]
+
+
+
     def build(self):
         # Create a date range for the entire period
         #dates = pd.date_range(start=self.start_date, end=self.end_date, freq='D')
         
         
         wind_data = self.prepare_wind_data()
+        el_price_data = self.prepare_el_price_data()
+
+        print("Electricity price data head:\n", el_price_data.head())
 
         # --- FINAL DF FORMAT --- #
         df = pd.DataFrame({  # <<< REWRITE >>>
@@ -114,13 +150,16 @@ class DataPreparationCSV:
         print("\nFinal DataFrame head:\n")  # <<< REWRITE >>>
         print(df.head())  # <<< REWRITE >>>
 
+        
+        
+
         return df  # <<< REWRITE >>>
 
 if __name__ == "__main__":
     prep = DataPreparationCSV(
         start_date="2016-01-01",
         end_date="2017-12-31",
-        el_price_file_name="",  # adjust as needed
+        el_price_file_name="Elspotprices_16-17.csv",  # adjust as needed
         wind_file_name=""  # adjust as needed
     )
 
