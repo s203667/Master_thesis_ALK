@@ -1,63 +1,38 @@
 import numpy as np
 import matplotlib.pyplot as plt
 
-def hydrogen_production(P, eff, plot=True):
+def simple_h2_prod(eff_kWh_per_Nm3=3.86):
 
-    P = np.linspace(0, 10000, 100)      # power input [kW]
-    Nm3_to_kg = 0.0899                  # conversion factor
-    eff = 3.86                          # efficiency
+    """
+    Convert power input to hydrogen production.
+
+    Parameters
+    ----------
+    P_kW : array-like
+        Power input [kW]
+    eff_kWh_per_Nm3 : float
+        Energy consumption [kWh/Nm3]
+
+    Returns
+    -------
+    h_kg_per_h : array
+        Hydrogen production [kg/h]
+    """
 
     load = np.array([0.25,0.5,0.75,1.0])
-    eff  = np.array([3.68,3.77,3.82, 3.86])
-    Pmax = 4000 #kW
+    P_max = 4000
+    Nm3_to_kg = 0.0899
+    P_kW = load * P_max
 
-    P = load * Pmax
-    h = (P / eff) * 0.0899
-
-    print("Power input (kW):", P)
-    print("Hydrogen production (kg/h):", h)
-
-    if plot:
-        #plotting
-        plt.figure(figsize=(10, 6))
-        plt.plot(P, h, marker='o')
-        plt.title('Hydrogen Production vs Power Input')
-        plt.xlabel('Power Input (kW)')
-        plt.ylabel('Hydrogen Production (kg/h)')
-        plt.grid()
-        plt.show()
-
-    return P, h
-
-
+    h = (P_kW / eff_kWh_per_Nm3) * Nm3_to_kg
+    return P_kW, h
 
 def electrolyzer_UI_curve(
-        # I_range,
-        # T=80,
-        # A=0.25,
-        # r1=8.05e-3,
-        # r2=-2.5e-7,
-        # s=0.185,
-        # t1=1.002,
-        # t2=8.424,
-        # t3=247.3,
-        # plot=True):
         I_range,
         T=80.0,          # °C
         p=1.0,           # bar (or same units as in your fitted d2)
         A=0.0625,          # m²
-        # Ulleberg / Julia-like coefficients:
-        # r1=0.7*0.8e-05, #Changed fron andrea Gloppen. Based on Hysata 290 mOhm/cm2 at 25 °C, but no reason for the scale yet. 
-        # r2=0.7*4.88874e-09,
-        # d1=0.7*-3.12996e-06,
-        # d2=0.7*4.47137e-07,
-        # s=0.7*0.33824,
-        # t1=-0.01539,
-        # t2=2.00181,
-        # t3=15.24178,
-
-
-        r1 = 0.7*4.45153E-05,
+        r1 = 0.7*4.45153E-05,#Changed fron andrea Gloppen. Based on Hysata 290 mOhm/cm2 at 25 °C, but no reason for the scale yet. 
         r2 = 0.7*6.88874E-09,
         d1 = 0.7*-3.12996E-06,
         d2 = 0.7*4.47137E-07,
@@ -101,7 +76,6 @@ def electrolyzer_UI_curve(
     # current density
     j = (I_range / A)
     j_plot = j*0.1 # Convert to mA/cm² for plotting
-    j_A_cm2 = j_plot *0.001
 
     # reversible voltage
     U_rev0 = (
@@ -144,10 +118,10 @@ def electrolyzer_UI_curve(
 
 
 
-    print("U_rev (V):", U_rev)
-    print("U_act (V):", U_act)
-    print("U_ohm (V):", U_ohm)
-    print("U_cell (V):", U_cell)
+    # print("U_rev (V):", U_rev)
+    # print("U_act (V):", U_act)
+    # print("U_ohm (V):", U_ohm)
+    # print("U_cell (V):", U_cell)
 
 
 
@@ -185,11 +159,14 @@ def U_tn(T, p, W_t=0.30, w_z=0.0):
     return U_tn_eq, U_HHV
 
 def Eff_models(T, j, p, U_cell):
-    # Faraday efficiency (placeholder, should depend on j)
     f1 = 250 #mA^2 /cm^4
-    f2 = 0.98
+    f2 = 1
+    f11 = 478645.74 # A2 m-4
+    f12 = -2953.15 # A2 m-4 C-1
+    f21 = 1.03960
+    f22 = -0.00104 #C-1 
     j_mA_cm2 = j * 0.1 # Convert to mA/cm²
-    eta_f = (j_mA_cm2**2)/(f1+j_mA_cm2**2)*f2
+    eta_f = (j_mA_cm2**2)/(f1+j_mA_cm2**2)*f2 #(j**2 / (f11 + f12*T + j**2)) * (f21 + f22*T)  
 
     # Voltage efficiency: thermoneutral / actual cell voltage
     U_tn_eq, U_HHV = U_tn(T, p, W_t=0.30, w_z=0.0)  # scalar
@@ -212,6 +189,19 @@ def H2_rate(T, p, j, A_cell, N_cell, eta_f):
 
     return m_dot
 
+def electrolyzer_h2_prod_curve(T, I_range, A_cell, p, p_out, N_stacks, N_cell):
+    j = I_range / A_cell
+    _, _, U_cell = electrolyzer_UI_curve(I_range, T=T, p=p, A=A_cell, plot=False)
+    eta_f, _, _ = Eff_models(T, j, p, U_cell)
+    m_dot = N_stacks * H2_rate(T, p, j, A_cell, N_cell, eta_f)
+
+    P_stack = N_stacks * N_cell * U_cell * I_range / 1000  # kW
+    P_comp = compressor_power(T, p, p_out) * m_dot
+    P_total = P_stack + P_comp
+
+
+    return P_total, m_dot
+
 def compressor_power(T, p, p_out, eta_c=0.85, gamma=1.4):
     R = 8.314 # J/(mol*K)
     M_H2 = 2.0158e-3 # kg/mol
@@ -223,22 +213,18 @@ def compressor_power(T, p, p_out, eta_c=0.85, gamma=1.4):
 
     return P_C
 
-# def power_vs_hydrogen(P, eff, N_cell,U_cell,A_cell,j, I_range):
-#     # Calculate hydrogen production rate
-#     P = np.linspace(0, 10000, 100)      # power input [kW]
 
-
-#     return P, h
 
 if __name__ == "__main__":
     # Example usage
     # system parameters
     A_cell = 0.0625
-    T = 80
+    T_static = 80
     p = 40
     p_out = 45
-
-    #P, h = hydrogen_production(P=4000, eff=3.86)
+    N_cell = 250
+    N_stacks = 40
+ 
     #I_range = np.linspace(5, 5500, 50)  # Current range from 5 to 300 A
     j_mA_cm2 = np.linspace(1, 400, 50)
     j = j_mA_cm2 * 10          # A/m²
@@ -247,17 +233,13 @@ if __name__ == "__main__":
 
     Nm3_to_kg = 0.0899                  # conversion factor
     M_H2 = 2.0158e-3 # kg/mol
-    z=2
-    F=96485  # C/mol
-    eff = 3.86                          # efficiency
     N_cell = 250
     N_stacks = 40
-    U_tn_eq, U_HHV = U_tn(T, p, W_t=0.30, w_z=0.0)
+    U_tn_eq, U_HHV = U_tn(T_static, p, W_t=0.30, w_z=0.0)
 
     # operating range
     #I_range = np.linspace(5, 5500, 50)  # A
 
- 
 
     # get voltage curve
     temperatures = [55, 80, 110]   # three temperatures you want to compare
@@ -278,35 +260,26 @@ if __name__ == "__main__":
   
 
 
+    P_total, m_dot = electrolyzer_h2_prod_curve(
+    T_static, I_range, A_cell, p, p_out, N_stacks, N_cell
+    )   
 
-    eta_f, eta_v, eta_tot = Eff_models(T, j, p, U_cell)
+    # P_target = 4000 # Target power for scaling
+    # P_max_current = np.max(P_total)
+    # scale_factor = P_target / P_max_current
+    # N_stacks_scaled = N_stacks * scale_factor
+    # P_total = P_total * scale_factor
+    # m_dot = m_dot * scale_factor
+
+    #Recompute:
+    #m_dot = N_stacks_scaled * H2_rate(T_static, p, j, A_cell, N_cell, eta_f)
+    #P = N_stacks_scaled * N_cell * P_1cell
 
 
-
-    # hydrogen production for 1 cell
-    m_dot_1cell = H2_rate(T, p, j, A_cell, 1, eta_f)
-    
-    # hydrogen production for N cells
-    m_dot = N_stacks * H2_rate(T, p, j, A_cell, N_cell, eta_f)
-
-    #compressor power
-    E_Comp = compressor_power(T, p, p_out)
-    P_C = E_Comp * m_dot
-
-    # power for 1 cell
-    P_1cell = U_cell * I_range  # W
-    
-    # power for N cells in series
-    P = N_stacks * N_cell * P_1cell  # W
-
-    # convert to kW
-    P_kW = P / 1000
-
-    P_total = P_kW + P_C
-
+    eta_kg_per_MWh = (m_dot / P_total) * 1000
     HHV_kWh_per_kg = 39.4
     eta_p = m_dot * HHV_kWh_per_kg / P_total
-    eta_HHV = eta_f*(3600*M_H2*U_HHV)/(z*F*U_cell)
+    #eta_HHV = eta_f*(3600*M_H2*U_HHV)/(z*F*U_cell)
 
     # 🔹 Linear fit analysis
     coeffs = np.polyfit(P_total, m_dot, 1)  # Linear fit: y = slope*x + intercept
@@ -348,23 +321,37 @@ if __name__ == "__main__":
     
     plt.show()
     
+    temperatures_H2_prod = [50, 60, 70, 80, 90, 100, 110]   # three temperatures you want to compare
+    colors = ["blue", "green", "red", "cyan", "magenta", "orange", "purple"]
     # 🔹 Plot 2: Electrolyzer model vs Simple model comparison
     plt.figure(figsize=(10, 6))
-    plt.plot(P_total, m_dot, 'o-', color='tab:blue', markersize=4, linewidth=2, label='Electrolyzer model')
-    
+
+    for T_plot, c in zip(temperatures_H2_prod, colors):
+        P_temp, m_dot_temp = electrolyzer_h2_prod_curve(
+            T_plot, I_range, A_cell, p, p_out, N_stacks, N_cell
+        )
+        plt.plot(P_temp, m_dot_temp, '-o', color=c, markersize=4, linewidth=1.5,
+                 label=f'Electrolyzer model T={T_plot} °C')
+
     # Add the hydrogen_production curve
-    P_simple, h_simple = hydrogen_production(P=4000, eff=3.86, plot=False)
+    P_simple, h_simple = simple_h2_prod(eff_kWh_per_Nm3=3.86)
     plt.plot(P_simple, h_simple, '^-', color='tab:cyan', markersize=6, linewidth=2, label='Shiptown Data')
-    
+
     plt.xlabel('Power input [kW]')
     plt.ylabel('Hydrogen production [kg/h]')
     plt.title('Electrolyzer model vs Shiptown data comparison')
     plt.grid(True)
-    plt.legend(loc='upper left')
-    
+    plt.legend(loc='upper left', fontsize='small')
+
     plt.show()
 
-   
+    plt.figure()
+    plt.plot(P_total, eta_kg_per_MWh, 'o-')
+    plt.xlabel("Power input [kW]")
+    plt.ylabel("Efficiency [kg/MWh]")
+    plt.title("Electrolyzer efficiency (kg/MWh)")
+    plt.grid()
+    plt.show()
 
 
     print("Total efficiency at max current:", eta_tot[-1])
@@ -373,3 +360,4 @@ if __name__ == "__main__":
     print("Specific energy at max load [kWh/Nm3]:", E_spec_kWh_per_Nm3[-1])
     print("U_cell max:", U_cell[-1])
     print("new slope:", m_dot[-1] / P_total[-1])
+    
