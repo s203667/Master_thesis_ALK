@@ -75,15 +75,15 @@ class DataPreparationCSV:
         data.drop(columns=["TimeStamp"], inplace=True, errors="ignore")
 
 
-        data = data[["time", "wtc_AcWindSp_mean", "wtc_ActPower_mean"]]  # <<< REWRITE >>>
+        data = data[["time", "wtc_AcWindSp_mean", "wtc_ActPower_mean"]]  #
 
         data["time"] = pd.to_datetime(data["time"])
         data.set_index("time", inplace=True)
-        data.sort_index(inplace=True)  # <<< REWRITE >>>
+        data.sort_index(inplace=True)  #
 
 
         # --- INTERPOLATE TO 15 MIN --- #
-        data_15min = data.resample("15min").mean().interpolate(method="time")  # <<< REWRITE >>>
+        data_15min = data.resample("15min").mean()
 
 
         # --- SAVE CACHE --- #
@@ -153,7 +153,7 @@ class DataPreparationCSV:
         # Remove duplicates
         df_fcr = df_fcr[~df_fcr.index.duplicated(keep='first')]
 
-        # --- SELECT RELEVANT COLUMNS --- #
+        # --- SELECT RELEVANT COLUMNS --- # 
         df_fcr = df_fcr[[
             "FCR_UpPriceEUR",
             "FCR_DownPriceEUR",
@@ -171,6 +171,10 @@ class DataPreparationCSV:
         # 🔹 --- RESAMPLE DIRECTLY TO 4 HOURS --- #
         df_fcr_4h = df_fcr.resample("4H").mean()
         df_fcr_4h["price_FCR"] = (df_fcr_4h["price_FCR_up"] + df_fcr_4h["price_FCR_down"]) / 2
+        #Convert from EUR/MW to EUR/kW and volume from MW to kW
+        df_fcr_4h["price_FCR"] = df_fcr_4h["price_FCR"] / 1000
+        df_fcr_4h["volume_up"] = df_fcr_4h["volume_up"] * 1000
+        df_fcr_4h["volume_down"] = df_fcr_4h["volume_down"] * 1000
 
         # --- SAVE CACHE --- #
         df_fcr_4h.to_csv(cache_file)
@@ -188,8 +192,6 @@ class DataPreparationCSV:
         el_price_data = self.prepare_el_price_data()
         FCR_price_data = self.prepare_FCR_data()
 
-        print("Electricity price data head:\n", el_price_data.head())
-        print("FCR price data head:\n", FCR_price_data.head())
 
         # --- FINAL DF FORMAT --- #
         df = pd.DataFrame({  # <<< REWRITE >>>
@@ -200,19 +202,19 @@ class DataPreparationCSV:
 
         df = df.reset_index(drop=True)  # <<< REWRITE >>>
 
-        print("\nFinal DataFrame head:\n")  # <<< REWRITE >>>
-        print(df.head())  # <<< REWRITE >>>
-
-        
-        
-
-        return df  # <<< REWRITE >>>
+        # Return all prepared data
+        return {
+            'wind': wind_data,
+            'el_price': el_price_data,
+            'fcr': FCR_price_data
+        }
 
 if __name__ == "__main__":
     prep = DataPreparationCSV(
         start_date="2016-01-01",
         end_date="2017-12-31",
         el_price_file_name="",  # adjust as needed
-        wind_file_name=""  # adjust as needed
+        wind_file_name="",  # adjust as needed
+        fcr_file_name=""  # adjust as needed
     )
 

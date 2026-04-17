@@ -13,7 +13,7 @@ class InputData:
                  P_seg_min, P_seg_max,
                  A_s, B_s,
                  storage_max, storage_initial,
-                 N_down):
+                 N_down, FCR_volume):
 
         self.T = T              # time steps
         self.S = S              # segments
@@ -39,7 +39,8 @@ class InputData:
         self.storage_max = storage_max
         self.storage_initial = storage_initial
         self.N_down = N_down
-        self.P_min_bid = 1 # Minimum bid size for FCR [MW]
+        self.P_min_bid = 1000 # Minimum bid size for FCR [kW]
+        self.P_max_bid = FCR_volume  # array per block [kW], volumeUP from FCR data, adjust as needed
 
 class ElectrolyzerModel:
 
@@ -52,9 +53,9 @@ class ElectrolyzerModel:
         m = ConcreteModel()
 
         # --- Sets ---
-        m.T = RangeSet(0, len(self.data.T) - 1)
-        m.S = RangeSet(0, len(self.data.S) - 1) #Change this probably
-        m.I = RangeSet(0, len(self.data.I) - 1)
+        m.T = RangeSet(0, self.data.T - 1)
+        m.S = RangeSet(0, self.data.S - 1)
+        m.I = RangeSet(0, self.data.I - 1)
 
         # --- Variables ---
         m.P_seg = Var(m.T, m.S, domain=NonNegativeReals)
@@ -80,7 +81,7 @@ class ElectrolyzerModel:
 
         m.r_FCR_block = Var(m.I, domain=NonNegativeReals)
         m.z_FCR = Var(m.I, domain=Binary)
-        m.r_FCR_t = Var(m.T, domain=NonNegativeReals)
+        
 
         self.model = m
 
@@ -103,28 +104,14 @@ class ElectrolyzerModel:
             block_size = 16  # 4 hours / 15 min
             return t // block_size
 
-        # def fcr_constant_rule(m, t):
-        #     if t == 0:
-        #         return Constraint.Skip
-        #     if map_t_to_i(t) == map_t_to_i(t-1):
-        #         return m.r_FCR_t[t] == m.r_FCR_t[t-1]
-        #     return Constraint.Skip
-
-        # m.fcr_constant = Constraint(m.T, rule=fcr_constant_rule)
-
-        # Link FCR power to block variables
-        def fcr_link_rule(m, t):
-            i = map_t_to_i(t)
-            return m.r_FCR_t[t] == m.r_FCR_block[i]
-
-        m.fcr_link = Constraint(m.T, rule=fcr_link_rule)
-
          #Piecewise bounds
-        def seg_bounds_rule(m, t, s):
-            return (d.P_seg_min[s] * m.z_seg[t, s],
-                    m.P_seg[t, s],
-                    d.P_seg_max[s] * m.z_seg[t, s])
-        m.seg_bounds = Constraint(m.T, m.S, rule=seg_bounds_rule)
+        def seg_min_rule(m, t, s):
+            return m.P_seg[t, s] >= d.P_seg_min[s] * m.z_seg[t, s]
+        m.seg_min = Constraint(m.T, m.S, rule=seg_min_rule)
+
+        def seg_max_rule(m, t, s):
+            return m.P_seg[t, s] <= d.P_seg_max[s] * m.z_seg[t, s]
+        m.seg_max = Constraint(m.T, m.S, rule=seg_max_rule)
 
         #Only one segment active
         def one_seg_rule(m, t):
@@ -141,7 +128,7 @@ class ElectrolyzerModel:
             return (
                 sum(m.P_seg[t, s] for s in m.S)
                 + m.P_sb[t]
-                + m.r_FCR_t[t]
+                + m.r_FCR_block[map_t_to_i(t)]
                 <= d.P_max * m.z_on[t]
             )
         m.total_power = Constraint(m.T, rule=total_power_rule)
@@ -151,7 +138,7 @@ class ElectrolyzerModel:
             return (
                 sum(m.P_seg[t, s] for s in m.S)
                 + m.P_sb[t]
-                - m.r_FCR_t[t]
+                -  m.r_FCR_block[map_t_to_i(t)]
                 >= d.P_min * m.z_on[t]
             )
         m.min_load = Constraint(m.T, rule=min_load_rule)
@@ -162,9 +149,11 @@ class ElectrolyzerModel:
         m.h2_prod = Constraint(m.T, rule=h2_rule)
 
                 # --- Standby power --- #Consider removing this
-        def standby_rule(m, t):
-            return sum(m.P_seg[t, s] for s in m.S) == 0 if m.z_sb[t] == 1 else Constraint.Skip
-        m.standby = Constraint(m.T, rule=standby_rule) #Consider removing this
+        # def standby_rule(m, t):
+        #     # If z_sb[t] == 1, then sum P_seg == 0
+        #     # Use big-M: sum P_seg <= P_max * (1 - z_sb)
+        #     return sum(m.P_seg[t, s] for s in m.S) <= d.P_max * (1 - m.z_sb[t])
+        # m.standby = Constraint(m.T, rule=standby_rule) #Consider removing this
 
         #Standby power
         def standby_power_rule(m, t):
@@ -182,14 +171,14 @@ class ElectrolyzerModel:
         # Minimum downtime
         def downtime_rule(m, t):
             return sum(
-                m.z_off[k] for k in range(t, min(t + d.N_down, len(d.T)))
+                m.z_off[k] for k in range(t, min(t + d.N_down, d.T))
             ) >= d.N_down * m.y_shutdown[t]
         m.downtime = Constraint(m.T, rule=downtime_rule)
 
         # Storage dynamics 
         def storage_rule(m, t):
             if t == 0:
-                return m.storage[t] == 0
+                return m.storage[t] == d.storage_initial
             return m.storage[t] == m.storage[t-1] + m.h[t] - m.h_sell[t]
         m.storage_dyn = Constraint(m.T, rule=storage_rule)
 
@@ -199,14 +188,10 @@ class ElectrolyzerModel:
         m.storage_bound = Constraint(m.T, rule=storage_bound_rule)
 
         #--- add storage start and end constraints ---
-        #Initial storage
-        def storage_init_rule(m):
-            return m.storage[0] == d.storage_initial
-        m.storage_init = Constraint(rule=storage_init_rule)
 
         #Terminal storage
         def storage_terminal_rule(m):
-            return m.storage[len(d.T)-1] >= d.storage_initial
+            return m.storage[d.T-1] >= d.storage_initial
         m.storage_terminal = Constraint(rule=storage_terminal_rule)
 
         # Power balance
@@ -231,19 +216,21 @@ class ElectrolyzerModel:
         m.grid_sell = Constraint(m.T, rule=grid_sell_rule)
 
 
-        def fcr_bounds_rule(m, i):
-            return (
-                d.P_min_bid * m.z_FCR[i] ,
-                m.r_FCR_block[i],
-                d.P_max * m.z_FCR[i]
-            )
-        m.fcr_bounds = Constraint(m.I, rule=fcr_bounds_rule)
+        def fcr_min_rule(m, i):
+            return m.r_FCR_block[i] >= d.P_min_bid * m.z_FCR[i]
+        m.fcr_min = Constraint(m.I, rule=fcr_min_rule)
 
+        def fcr_max_rule(m, i):
+            upper_bound = min(d.P_max, d.P_max_bid[i])
+            return m.r_FCR_block[i] <= upper_bound * m.z_FCR[i]
+        m.fcr_max = Constraint(m.I, rule=fcr_max_rule)
 
-
+        def fcr_activation_rule(m, i):
+            return m.r_FCR_block[i] <= d.P_max * m.z_FCR[i]
+        m.fcr_activation = Constraint(m.I, rule=fcr_activation_rule)
         # FCR can only be provided when state is on / operating
         def fcr_on_rule(m, t):
-            return m.r_FCR_t[t] <= d.P_max * m.z_on[t]
+            return m.r_FCR_block[map_t_to_i(t)] <= d.P_max * m.z_on[t]
         m.fcr_on = Constraint(m.T, rule=fcr_on_rule)
 
         # ramping consraints
