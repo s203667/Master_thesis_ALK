@@ -17,6 +17,6 @@ A_s, B_s, P_seg_min, P_seg_max, P_total, m_dot = generate_piecewise(
     N_stacks=40,
     N_cell=250,
     n_segments=6,
-    plot=True   # 👈 super useful for debugging
+    plot=True   
 )
 

@@ -127,6 +127,57 @@ class DataPreparationCSV:
         return df_el_15min.loc[self.start_date:self.end_date]
 
 
+    def prepare_FCR_data(self):
+        # --- CACHE SETUP --- #
+        BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+        cache_dir = os.path.abspath(os.path.join(BASE_DIR, "..", "data", "cache"))
+        os.makedirs(cache_dir, exist_ok=True)
+        cache_file = os.path.join(cache_dir, "fcr_4h_cached_v2.csv")
+
+        # --- LOAD CACHE --- #
+        if os.path.exists(cache_file):
+            print("Loading cached FCR 4h data...")
+            df = pd.read_csv(cache_file, parse_dates=["time"], index_col="time")
+            return df.loc[self.start_date:self.end_date]
+
+        print("Processing raw FCR data...")
+
+        # --- LOAD RAW --- #
+        df_fcr = load_csv_data("FcrReservesDK1.csv", sep=";", decimal=",")
+
+        # Parse timestamp
+        df_fcr["time"] = pd.to_datetime(df_fcr["HourDK"], format="%Y-%m-%d %H:%M:%S")
+        df_fcr.set_index("time", inplace=True)
+        df_fcr.sort_index(inplace=True)
+
+        # Remove duplicates
+        df_fcr = df_fcr[~df_fcr.index.duplicated(keep='first')]
+
+        # --- SELECT RELEVANT COLUMNS --- #
+        df_fcr = df_fcr[[
+            "FCR_UpPriceEUR",
+            "FCR_DownPriceEUR",
+            "FCR_UpPurchased",
+            "FCR_DownPurchased"
+        ]].rename(columns={
+            "FCR_UpPriceEUR": "price_FCR_up",
+            "FCR_DownPriceEUR": "price_FCR_down",
+            "FCR_UpPurchased": "volume_up",
+            "FCR_DownPurchased": "volume_down"
+        })
+
+        # Calculate mean FCR price
+        
+        # 🔹 --- RESAMPLE DIRECTLY TO 4 HOURS --- #
+        df_fcr_4h = df_fcr.resample("4H").mean()
+        df_fcr_4h["price_FCR"] = (df_fcr_4h["price_FCR_up"] + df_fcr_4h["price_FCR_down"]) / 2
+
+        # --- SAVE CACHE --- #
+        df_fcr_4h.to_csv(cache_file)
+        print("FCR 4h cache saved!")
+
+        return df_fcr_4h.loc[self.start_date:self.end_date]
+
 
     def build(self):
         # Create a date range for the entire period
@@ -135,8 +186,10 @@ class DataPreparationCSV:
         
         wind_data = self.prepare_wind_data()
         el_price_data = self.prepare_el_price_data()
+        FCR_price_data = self.prepare_FCR_data()
 
         print("Electricity price data head:\n", el_price_data.head())
+        print("FCR price data head:\n", FCR_price_data.head())
 
         # --- FINAL DF FORMAT --- #
         df = pd.DataFrame({  # <<< REWRITE >>>
@@ -159,7 +212,7 @@ if __name__ == "__main__":
     prep = DataPreparationCSV(
         start_date="2016-01-01",
         end_date="2017-12-31",
-        el_price_file_name="Elspotprices_16-17.csv",  # adjust as needed
+        el_price_file_name="",  # adjust as needed
         wind_file_name=""  # adjust as needed
     )
 

@@ -233,11 +233,12 @@ class ElectrolyzerModel:
 
         def fcr_bounds_rule(m, i):
             return (
-                d.P_min_bid * m.z_FCR[i],
+                d.P_min_bid * m.z_FCR[i] ,
                 m.r_FCR_block[i],
                 d.P_max * m.z_FCR[i]
             )
         m.fcr_bounds = Constraint(m.I, rule=fcr_bounds_rule)
+
 
 
         # FCR can only be provided when state is on / operating
