@@ -259,16 +259,15 @@ class ElectrolyzerModel:
     def _build_objective(self):
         m = self.model
         d = self.data
-
+        dt = 0.25
         def obj_rule(m):
             return sum(
-                m.h[t] * d.price_H2[t]
-                - m.P_buy[t] * d.price_DA[t]
-                + m.P_sell[t] * d.price_DA[t]
+                m.h[t] * d.price_H2[t] * dt  # H2 production [kg/h] * price [EUR/kg] * time [h]
+                - m.P_buy[t] * d.price_DA[t] * dt / 1000  # Electricity buy [kW] * price [EUR/MWh] * time [h] / 1000
+                + m.P_sell[t] * d.price_DA[t] * dt / 1000  # Electricity sell [kW] * price [EUR/MWh] * time [h] / 1000
                 for t in m.T
-            ) + sum(m.r_FCR_block[i] * d.price_FCR[i] * 4 
+            ) + sum(m.r_FCR_block[i] * d.price_FCR[i] * 4  # FCR [kW] * price [EUR/kW] * block time [h]
                     for i in m.I)
-                    #Times four because FCR is paid per block and each block is 4 hours
         m.obj = Objective(rule=obj_rule, sense=maximize)
 
 
@@ -281,4 +280,9 @@ class ElectrolyzerModel:
         m = self.model
         self.results.h = [value(m.h[t]) for t in m.T]
         self.results.storage = [value(m.storage[t]) for t in m.T]
-        
+        self.results.z_on = [value(m.z_on[t]) for t in m.T]  # On/off status
+        self.results.P_buy = [value(m.P_buy[t]) for t in m.T]  # Electricity bought
+        self.results.P_sell = [value(m.P_sell[t]) for t in m.T]  # Electricity sold
+        self.results.P_curt = [value(m.P_curt[t]) for t in m.T]  # Curtailed power
+        self.results.r_FCR_block = [value(m.r_FCR_block[i]) for i in m.I]  # FCR block power
+        self.results.P_curt = [value(m.P_curt[t]) for t in m.T]  # Curtailed power

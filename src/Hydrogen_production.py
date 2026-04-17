@@ -291,6 +291,8 @@ if __name__ == "__main__":
     ss_res = np.sum(residuals**2)
     ss_tot = np.sum((m_dot - np.mean(m_dot))**2)
     r_squared = 1 - (ss_res / ss_tot)
+
+    eta_tot, eta_f, eta_v = Eff_models(T_static, j, p, U_cell)
     
     # 🔹 Plot 1: Electrolyzer model with efficiency and linear fit
     fig1, ax1_1 = plt.subplots(figsize=(10, 6))

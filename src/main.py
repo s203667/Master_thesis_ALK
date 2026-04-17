@@ -3,6 +3,7 @@ import Hydrogen_production as hp
 import numpy as np
 from Data_preparation import DataPreparationCSV
 from Optimizer import InputData, ElectrolyzerModel
+import matplotlib.pyplot as plt
 
 # --- DATA PREPARATION --- #
 print("Preparing data...")
@@ -97,4 +98,42 @@ print("Storage levels:", model.results.storage[:5])
 print(wind[:10])
 print(np.max(wind))
 
+# Analyze results
+# Plot H2 production and storage
+plt.figure(figsize=(12,6))
+plt.subplot(2,1,1)
+plt.plot(model.results.h[:100])  # First 100 periods
+plt.title('H2 Production (kg/h)')
+plt.subplot(2,1,2)
+plt.plot(model.results.storage[:100])
+plt.title('Storage Level (kg)')
+plt.show()
 
+# Check operation stats
+# Check operation stats
+on_periods = sum(model.results.z_on)
+total_h2 = sum(model.results.h)
+print(f"Electrolyzer on for {on_periods} periods")
+print(f"Total H2 produced: {total_h2:.1f} kg")
+
+# Plot more
+plt.figure(figsize=(12,8))
+plt.subplot(3,1,1)
+plt.plot(model.results.z_on[:100])
+plt.title('Electrolyzer On/Off')
+plt.subplot(3,1,2)
+plt.plot(model.results.P_buy[:100], label='Buy')
+plt.plot(model.results.P_sell[:100], label='Sell')
+plt.legend()
+plt.title('Electricity Trading (kW)')
+# Expand FCR block values to per-time-step
+fcr_per_t = []
+for i in range(len(model.results.r_FCR_block)):
+    fcr_value = model.results.r_FCR_block[i]
+    fcr_per_t.extend([fcr_value] * 16)  # 16 × 15-min = 4 hours
+
+plt.subplot(3,1,3)
+plt.plot(fcr_per_t[:100])  # Now per time step
+plt.title('FCR Power (kW)')
+plt.tight_layout()
+plt.show()
