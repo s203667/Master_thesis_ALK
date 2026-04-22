@@ -79,7 +79,7 @@ def generate_piecewise(
         import matplotlib.pyplot as plt
 
         plt.figure(figsize=(8, 5))
-        plt.plot(P_total, m_dot, 'o', label='Physics model')
+        plt.plot(P_total, m_dot, 'o', label='Hydrogen model')
 
         for s in range(n_segments):
             P_line = np.linspace(P_seg_min[s], P_seg_max[s], 50)

@@ -9,7 +9,7 @@ import matplotlib.pyplot as plt
 print("Preparing data...")
 prep = DataPreparationCSV(
     start_date="2016-01-01",
-    end_date="2016-12-31",  # Shorter period for testing
+    end_date="2016-05-31",  # Shorter period for testing
     el_price_file_name="",
     wind_file_name=""
 )
@@ -42,19 +42,22 @@ A_s, B_s, P_seg_min, P_seg_max, P_total, m_dot = generate_piecewise(
 )
 
 print("Piecewise approximation generated.")
+print("A_s:", A_s)
+print("Typical efficiency (kg/kWh):", A_s)
 
 # --- OPTIMIZATION SETUP --- #
 print("Setting up optimization...")
 
 # Time parameters
-T = len(wind_df)  # Number of time steps (15-min intervals)
+H = 96  # e.g. 1 day (96 × 15min)
+step = 24  # move horizon by 6 hours
 S = len(A_s)      # Number of segments
 I = len(fcr_df)   # Number of FCR blocks (4-hour intervals)
 
 # Data
 wind = wind_df['wtc_ActPower_mean'].values  # Wind power [kW]
 price_DA = el_price_df['el_price[EUR/MWh]'].values  # Day-ahead price [EUR/MWh]
-price_H2 = np.full(T, 5.5)  # Hydrogen price [EUR/kg], constant for now, from European Hydrogen Observatory
+price_H2 = np.full(H, 20)  # Hydrogen price [EUR/kg], constant for now, from European Hydrogen Observatory
 price_FCR = fcr_df['price_FCR'].values  # FCR price [EUR/MW]
 FCR_volume = fcr_df["volume_up"].values * 1000 #consider not multiplying by 1000? #Max volume possible to bid
 
@@ -63,40 +66,87 @@ P_min = 0.0      # Minimum power [kW]
 P_max = 4000.0  # Maximum power [kW] (adjust based on system)
 P_sb = 100.0     # Standby power [kW]
 
+#r_FCR_block = 0  ####TEMPORARILY WHILE TESTING #####
 # Storage parameters
 storage_max = 1000.0     # Max storage [kg]
 storage_initial = 0.0     # Initial storage [kg]
 N_down = 3             # Downtime in 15min intervals, adjust as needed
 
-# Create input data
-input_data = InputData(
-    T=T, S=S, I=I,
-    wind=wind,
-    price_DA=price_DA,
-    price_H2=price_H2,
-    price_FCR=price_FCR,
-    P_min=P_min, P_max=P_max, P_sb=P_sb,
-    P_seg_min=P_seg_min, P_seg_max=P_seg_max,
-    A_s=A_s, B_s=B_s,
-    storage_max=storage_max,
-    storage_initial=storage_initial,
-    N_down=N_down, 
-    FCR_volume=FCR_volume
-)
+t0 = 0
 
-# Create and solve model
-model = ElectrolyzerModel(input_data)
-print("Optimization model created.")
+storage_state = storage_initial
+z_on_state = 1
+P_prev = 0
 
-# Solve
-model.run()
-print("Optimization completed.")
+results_all = []
+
+while t0 < len(wind):
+
+    # --- 1. Effective horizon ---
+    H_eff = min(H, len(wind) - t0)
+
+    # --- 2. Slice ALL time-dependent data consistently ---
+    wind_slice = wind[t0:t0 + H_eff]
+    price_slice = price_DA[t0:t0 + H_eff]
+    h2_price_slice = np.full(H_eff, 5.5)
+
+    # --- 3. Handle block data (FCR) carefully ---
+    i0 = t0 // 16
+    I_eff = int(np.ceil(H_eff / 16))
+
+    price_FCR_slice = price_FCR[i0:i0 + I_eff]
+    FCR_volume_slice = FCR_volume[i0:i0 + I_eff]
+
+    # Ensure consistency
+    I_eff = len(price_FCR_slice)
+
+    # --- 4. Build model ---
+    input_data = InputData(
+        T=H_eff,
+        S=S,
+        I=I_eff,
+        wind=wind_slice,
+        price_DA=price_slice,
+        price_H2=h2_price_slice,
+        price_FCR=price_FCR_slice,
+        P_min=P_min,
+        P_max=P_max,
+        P_sb=P_sb,
+        P_seg_min=P_seg_min,
+        P_seg_max=P_seg_max,
+        A_s=A_s,
+        B_s=B_s,
+        storage_max=storage_max,
+        storage_initial=storage_state,
+        N_down=N_down,
+        FCR_volume=FCR_volume_slice,
+        z_on_prev=z_on_state,
+        P_prev=P_prev
+    )
+
+    model = ElectrolyzerModel(input_data)
+    model.run()
+
+    # --- 5. Extract only implemented part (step) ---
+    step_eff = min(step, H_eff)
+
+    storage_state = model.results.storage[step_eff - 1]
+    z_on_state = model.results.z_on[step_eff - 1]
+    P_prev = sum(
+        model.model.P_seg[step_eff - 1, s].value
+        for s in model.model.S
+    )
+
+    results_all.append(model.results)
+
+    # --- 6. Move forward ---
+    t0 += step_eff
 
 # Access results
 print("Hydrogen production:", model.results.h[:5])  # First 5 values
 print("Storage levels:", model.results.storage[:5])
-print(wind[:10])
-print(np.max(wind))
+print("wind power last ten periods:", wind[:10])
+print("Maximum wind power:", np.max(wind))
 
 # Analyze results
 # Plot H2 production and storage

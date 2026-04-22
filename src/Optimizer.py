@@ -13,7 +13,7 @@ class InputData:
                  P_seg_min, P_seg_max,
                  A_s, B_s,
                  storage_max, storage_initial,
-                 N_down, FCR_volume):
+                 N_down, FCR_volume, z_on_prev=0, P_prev=0):
 
         self.T = T              # time steps
         self.S = S              # segments
@@ -42,12 +42,22 @@ class InputData:
         self.P_min_bid = 1000 # Minimum bid size for FCR [kW]
         self.P_max_bid = FCR_volume  # array per block [kW], volumeUP from FCR data, adjust as needed
 
+
+        self.z_on_prev = z_on_prev
+        self.P_prev = P_prev
 class ElectrolyzerModel:
 
     def __init__(self, data: InputData):
         self.data = data
         self.results = Expando()
+        # Default values so model can build
+  
+
         self._build_model()
+
+    def set_initial_state(self, z_on_prev, P_prev):
+        self.z_on_prev = z_on_prev
+        self.P_prev = P_prev
 
     def _build_model(self):
         m = ConcreteModel()
@@ -96,8 +106,10 @@ class ElectrolyzerModel:
         m = self.model
         d = self.data
 
-
-        
+        #TESTING FUNCTION; DELETE THIS
+        # def force_on(m, t):
+        #     return m.z_on[t] == 1
+        # m.force_on = Constraint(m.T, rule=force_on)
         ### Map time steps to FCR blocks ##
 
         def map_t_to_i(t):
@@ -113,7 +125,7 @@ class ElectrolyzerModel:
             return m.P_seg[t, s] <= d.P_seg_max[s] * m.z_seg[t, s]
         m.seg_max = Constraint(m.T, m.S, rule=seg_max_rule)
 
-        #Only one segment active
+        #Only one segment active #### WHY = Z_on?
         def one_seg_rule(m, t):
             return sum(m.z_seg[t, s] for s in m.S) == m.z_on[t]
         m.one_seg = Constraint(m.T, rule=one_seg_rule)
@@ -129,7 +141,7 @@ class ElectrolyzerModel:
                 sum(m.P_seg[t, s] for s in m.S)
                 + m.P_sb[t]
                 + m.r_FCR_block[map_t_to_i(t)]
-                <= d.P_max * m.z_on[t]
+                <= d.P_max * (m.z_on[t] + m.z_sb[t])
             )
         m.total_power = Constraint(m.T, rule=total_power_rule)
 
@@ -189,10 +201,10 @@ class ElectrolyzerModel:
 
         #--- add storage start and end constraints ---
 
-        #Terminal storage
-        def storage_terminal_rule(m):
-            return m.storage[d.T-1] >= d.storage_initial
-        m.storage_terminal = Constraint(rule=storage_terminal_rule)
+        #Terminal storage #REMOVE
+        # def storage_terminal_rule(m):
+        #     return m.storage[d.T-1] >= d.storage_initial
+        # m.storage_terminal = Constraint(rule=storage_terminal_rule)
 
         # Power balance
         def power_balance_rule(m, t):
@@ -228,16 +240,25 @@ class ElectrolyzerModel:
         def fcr_activation_rule(m, i):
             return m.r_FCR_block[i] <= d.P_max * m.z_FCR[i]
         m.fcr_activation = Constraint(m.I, rule=fcr_activation_rule)
+        
         # FCR can only be provided when state is on / operating
         def fcr_on_rule(m, t):
             return m.r_FCR_block[map_t_to_i(t)] <= d.P_max * m.z_on[t]
         m.fcr_on = Constraint(m.T, rule=fcr_on_rule)
 
+        def fcr_on_block_rule(m, i):
+            return m.z_FCR[i] <= m.z_on[i*16]
+        m.fcr_on_block = Constraint(m.I, rule=fcr_on_block_rule)
+
         # ramping consraints
         def ramp_up_rule(m, t):
             dR_up = 20 # MW/15Min #PLACEHOLDER
             if t == 0:
-                return Constraint.Skip
+                return (
+                    sum(m.P_seg[0, s] for s in m.S)
+                    - d.P_prev
+                    <= dR_up
+                )
             return (
                 sum(m.P_seg[t, s] for s in m.S)
                 - sum(m.P_seg[t-1, s] for s in m.S)
@@ -248,13 +269,23 @@ class ElectrolyzerModel:
         def ramp_down_rule(m, t):
             dR_down = 20 # MW/15min #PLACEHOLDER
             if t == 0:
-                return Constraint.Skip
+                return (
+                    d.P_prev
+                    - sum(m.P_seg[0, s] for s in m.S)
+                    <= dR_down
+                )
             return (
                 sum(m.P_seg[t-1, s] for s in m.S)
                 - sum(m.P_seg[t, s] for s in m.S)
                 <= dR_down
             )
         m.ramp_down = Constraint(m.T, rule=ramp_down_rule)
+
+
+        #Rolling horizon constraints:
+        def initial_on_rule(m):
+            return m.z_on[0] == d.z_on_prev
+        m.initial_on = Constraint(rule=initial_on_rule)
 
     def _build_objective(self):
         m = self.model
