@@ -37,8 +37,8 @@ A_s, B_s, P_seg_min, P_seg_max, P_total, m_dot = generate_piecewise(
     p_out=45,
     N_stacks=40,
     N_cell=250,
-    n_segments=6,
-    plot=False  # Set to True to see plot
+    n_segments=2,
+    plot=True  # Set to True to see plot
 )
 
 print("Piecewise approximation generated.")
@@ -57,14 +57,15 @@ I = len(fcr_df)   # Number of FCR blocks (4-hour intervals)
 # Data
 wind = wind_df['wtc_ActPower_mean'].values  # Wind power [kW]
 price_DA = el_price_df['el_price[EUR/MWh]'].values  # Day-ahead price [EUR/MWh]
-price_H2 = np.full(H, 20)  # Hydrogen price [EUR/kg], constant for now, from European Hydrogen Observatory
+price_H2 = np.full(H, 5.5)  # Hydrogen price [EUR/kg], constant for now, from European Hydrogen Observatory
 price_FCR = fcr_df['price_FCR'].values  # FCR price [EUR/MW]
 FCR_volume = fcr_df["volume_up"].values * 1000 #consider not multiplying by 1000? #Max volume possible to bid
-
+grid_cap = 200000.0  # Max grid power [kW], adjust as needed
 # Electrolyzer parameters
 P_min = 0.0      # Minimum power [kW]
 P_max = 4000.0  # Maximum power [kW] (adjust based on system)
 P_sb = 100.0     # Standby power [kW]
+
 
 #r_FCR_block = 0  ####TEMPORARILY WHILE TESTING #####
 # Storage parameters
@@ -118,6 +119,7 @@ while t0 < len(wind):
         B_s=B_s,
         storage_max=storage_max,
         storage_initial=storage_state,
+        grid_cap=grid_cap,
         N_down=N_down,
         FCR_volume=FCR_volume_slice,
         z_on_prev=z_on_state,
@@ -126,6 +128,11 @@ while t0 < len(wind):
 
     model = ElectrolyzerModel(input_data)
     model.run()
+
+    if not getattr(model.results, "has_solution", False):
+        print(f"No feasible solution at t0 = {t0}, skipping this window.")
+        t0 += step  # or break, or adjust as you like
+        continue
 
     # --- 5. Extract only implemented part (step) ---
     step_eff = min(step, H_eff)
@@ -143,43 +150,44 @@ while t0 < len(wind):
     t0 += step_eff
 
 # Access results
-print("Hydrogen production:", model.results.h[:5])  # First 5 values
-print("Storage levels:", model.results.storage[:5])
+print("Hydrogen production:", [h for result in results_all for h in result.h[:5]])  # First 5 values
+print("Storage levels:", [storage for result in results_all for storage in result.storage[:5]])
 print("wind power last ten periods:", wind[:10])
 print("Maximum wind power:", np.max(wind))
+print("buy or sell mode:", [model.model.z_grid_buy[t].value for t in model.model.T][:20])
 
 # Analyze results
 # Plot H2 production and storage
 plt.figure(figsize=(12,6))
 plt.subplot(2,1,1)
-plt.plot(model.results.h[:100])  # First 100 periods
+plt.plot([h for result in results_all for h in result.h[:100]])  # First 100 periods
 plt.title('H2 Production (kg/h)')
 plt.subplot(2,1,2)
-plt.plot(model.results.storage[:100])
+plt.plot([storage for result in results_all for storage in result.storage[:100]])
 plt.title('Storage Level (kg)')
 plt.show()
 
 # Check operation stats
 # Check operation stats
-on_periods = sum(model.results.z_on)
-total_h2 = sum(model.results.h)
+on_periods = sum([z for result in results_all for z in result.z_on])
+total_h2 = sum([h for result in results_all for h in result.h])
 print(f"Electrolyzer on for {on_periods} periods")
 print(f"Total H2 produced: {total_h2:.1f} kg")
 
 # Plot more
 plt.figure(figsize=(12,8))
 plt.subplot(3,1,1)
-plt.plot(model.results.z_on[:100])
+plt.plot([z for result in results_all for z in result.z_on[:100]])
 plt.title('Electrolyzer On/Off')
 plt.subplot(3,1,2)
-plt.plot(model.results.P_buy[:100], label='Buy')
-plt.plot(model.results.P_sell[:100], label='Sell')
+plt.plot([p for result in results_all for p in result.P_buy[:100]], label='Buy')
+plt.plot([p for result in results_all for p in result.P_sell[:100]], label='Sell')
 plt.legend()
 plt.title('Electricity Trading (kW)')
 # Expand FCR block values to per-time-step
 fcr_per_t = []
-for i in range(len(model.results.r_FCR_block)):
-    fcr_value = model.results.r_FCR_block[i]
+for i in range(len([r.r_FCR_block for result in results_all for r in [result]])):
+    fcr_value = [r.r_FCR_block for result in results_all for r in [result]][i]
     fcr_per_t.extend([fcr_value] * 16)  # 16 × 15-min = 4 hours
 
 plt.subplot(3,1,3)

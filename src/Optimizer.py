@@ -1,6 +1,7 @@
 from pyomo.environ import *
 #import hydrogen_production as hp
 import numpy as np
+from pyomo.opt import TerminationCondition
 
 class Expando:
     pass
@@ -12,7 +13,7 @@ class InputData:
                  P_min, P_max, P_sb,
                  P_seg_min, P_seg_max,
                  A_s, B_s,
-                 storage_max, storage_initial,
+                 storage_max, storage_initial, grid_cap,
                  N_down, FCR_volume, z_on_prev=0, P_prev=0):
 
         self.T = T              # time steps
@@ -38,6 +39,7 @@ class InputData:
 
         self.storage_max = storage_max
         self.storage_initial = storage_initial
+        self.grid_cap = grid_cap
         self.N_down = N_down
         self.P_min_bid = 1000 # Minimum bid size for FCR [kW]
         self.P_max_bid = FCR_volume  # array per block [kW], volumeUP from FCR data, adjust as needed
@@ -220,14 +222,13 @@ class ElectrolyzerModel:
 
         # Simultanous grid buy and sell
         def grid_buy_rule(m, t):
-            return m.P_buy[t] <= d.P_max * m.z_grid_buy[t]
+            return m.P_buy[t] <= d.grid_cap * m.z_grid_buy[t]
         m.grid_buy = Constraint(m.T, rule=grid_buy_rule)
 
         def grid_sell_rule(m, t):
-            return m.P_sell[t] <= d.P_max * (1 - m.z_grid_buy[t])
+            return m.P_sell[t] <= d.grid_cap * (1 - m.z_grid_buy[t])
         m.grid_sell = Constraint(m.T, rule=grid_sell_rule)
-
-
+        
         def fcr_min_rule(m, i):
             return m.r_FCR_block[i] >= d.P_min_bid * m.z_FCR[i]
         m.fcr_min = Constraint(m.I, rule=fcr_min_rule)
@@ -252,7 +253,7 @@ class ElectrolyzerModel:
 
         # ramping consraints
         def ramp_up_rule(m, t):
-            dR_up = 20 # MW/15Min #PLACEHOLDER
+            dR_up = 4000 # kW/15Min #PLACEHOLDER
             if t == 0:
                 return (
                     sum(m.P_seg[0, s] for s in m.S)
@@ -267,7 +268,7 @@ class ElectrolyzerModel:
         m.ramp_up = Constraint(m.T, rule=ramp_up_rule)
 
         def ramp_down_rule(m, t):
-            dR_down = 20 # MW/15min #PLACEHOLDER
+            dR_down = 4000 # kW/15min #PLACEHOLDER
             if t == 0:
                 return (
                     d.P_prev
@@ -302,9 +303,26 @@ class ElectrolyzerModel:
         m.obj = Objective(rule=obj_rule, sense=maximize)
 
 
+    # def run(self):
+    #     solver = SolverFactory('gurobi')
+    #     solver.solve(self.model, tee=True)
+    #     self._save_results()
+
+    
+
     def run(self):
         solver = SolverFactory('gurobi')
-        solver.solve(self.model, tee=True)
+        solver.options['DualReductions'] = 0  # helps distinguish infeasible vs unbounded
+        results = solver.solve(self.model, tee=True)
+
+        tc = results.solver.termination_condition
+        print("Termination condition:", tc)
+
+        self.results.has_solution = (tc == TerminationCondition.optimal)
+
+        if not self.results.has_solution:
+            return
+
         self._save_results()
 
     def _save_results(self):
