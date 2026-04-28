@@ -79,7 +79,7 @@ class ElectrolyzerModel:
 
         m.P_buy = Var(m.T, domain=NonNegativeReals)
         m.P_sell = Var(m.T, domain=NonNegativeReals)
-        m.z_grid_buy = Var(m.T, domain=Binary)
+        m.deficit = Var(m.T, domain=NonNegativeReals)
 
         m.P_curt = Var(m.T, domain=NonNegativeReals)
         m.P_sb = Var(m.T, domain=NonNegativeReals)
@@ -127,7 +127,7 @@ class ElectrolyzerModel:
             return m.P_seg[t, s] <= d.P_seg_max[s] * m.z_seg[t, s]
         m.seg_max = Constraint(m.T, m.S, rule=seg_max_rule)
 
-        #Only one segment active #### WHY = Z_on?
+        #Only one segment active when z_on=1. When z_on=0, all z_seg must be 0 and z_sb has its own constraint
         def one_seg_rule(m, t):
             return sum(m.z_seg[t, s] for s in m.S) == m.z_on[t]
         m.one_seg = Constraint(m.T, rule=one_seg_rule)
@@ -153,7 +153,7 @@ class ElectrolyzerModel:
                 sum(m.P_seg[t, s] for s in m.S)
                 + m.P_sb[t]
                 -  m.r_FCR_block[map_t_to_i(t)]
-                >= d.P_min * m.z_on[t]
+                >= d.P_min * (m.z_on[t] + m.z_sb[t])
             )
         m.min_load = Constraint(m.T, rule=min_load_rule)
 
@@ -181,6 +181,7 @@ class ElectrolyzerModel:
                 return Constraint.Skip
             return m.y_shutdown[t] >= m.z_off[t] - m.z_off[t-1]
         m.shutdown_def = Constraint(m.T, rule=shutdown_def)
+        
 
         # Minimum downtime
         def downtime_rule(m, t):
@@ -208,7 +209,7 @@ class ElectrolyzerModel:
         #     return m.storage[d.T-1] >= d.storage_initial
         # m.storage_terminal = Constraint(rule=storage_terminal_rule)
 
-        # Power balance
+        # Power balance (P_compressor included in P_seg)
         def power_balance_rule(m, t):
             return (
                 d.wind[t] + m.P_buy[t]
@@ -217,18 +218,38 @@ class ElectrolyzerModel:
                 + m.P_sb[t]
                 + m.P_sell[t]
                 + m.P_curt[t]
+            
             )
         m.power_balance = Constraint(m.T, rule=power_balance_rule)
 
-        # Simultanous grid buy and sell
-        def grid_buy_rule(m, t):
-            return m.P_buy[t] <= d.grid_cap * m.z_grid_buy[t]
-        m.grid_buy = Constraint(m.T, rule=grid_buy_rule)
+        # # Simultanous grid buy and sell
+        # def grid_buy_rule(m, t):
+        #     return m.P_buy[t] <= d.grid_cap * m.z_grid_buy[t]
+        # m.grid_buy = Constraint(m.T, rule=grid_buy_rule)
 
+        # def grid_sell_rule(m, t):
+        #     return m.P_sell[t] <= d.grid_cap * (1 - m.z_grid_buy[t])
+        # m.grid_sell = Constraint(m.T, rule=grid_sell_rule)
         def grid_sell_rule(m, t):
-            return m.P_sell[t] <= d.grid_cap * (1 - m.z_grid_buy[t])
+            return m.P_sell[t] <= d.grid_cap
         m.grid_sell = Constraint(m.T, rule=grid_sell_rule)
-        
+
+        def deficit_rule(m, t):
+            return m.deficit[t] >= (
+                sum(m.P_seg[t, s] for s in m.S)
+                + m.P_sb[t]
+                - d.wind[t]
+            )
+        m.deficit_con = Constraint(m.T, rule=deficit_rule)
+
+        def buy_limit_deficit_rule(m, t):
+            return m.P_buy[t] <= m.deficit[t]
+        m.buy_limit_deficit = Constraint(m.T, rule=buy_limit_deficit_rule)
+
+        def buy_limit_grid_rule(m, t):
+            return m.P_buy[t] <= d.grid_cap
+        m.buy_limit_grid = Constraint(m.T, rule=buy_limit_grid_rule)
+
         def fcr_min_rule(m, i):
             return m.r_FCR_block[i] >= d.P_min_bid * m.z_FCR[i]
         m.fcr_min = Constraint(m.I, rule=fcr_min_rule)
@@ -237,15 +258,11 @@ class ElectrolyzerModel:
             upper_bound = min(d.P_max, d.P_max_bid[i])
             return m.r_FCR_block[i] <= upper_bound * m.z_FCR[i]
         m.fcr_max = Constraint(m.I, rule=fcr_max_rule)
-
-        def fcr_activation_rule(m, i):
-            return m.r_FCR_block[i] <= d.P_max * m.z_FCR[i]
-        m.fcr_activation = Constraint(m.I, rule=fcr_activation_rule)
         
-        # FCR can only be provided when state is on / operating
-        def fcr_on_rule(m, t):
-            return m.r_FCR_block[map_t_to_i(t)] <= d.P_max * m.z_on[t]
-        m.fcr_on = Constraint(m.T, rule=fcr_on_rule)
+        # # FCR can only be provided when state is on / operating
+        # def fcr_on_rule(m, t):
+        #     return m.r_FCR_block[map_t_to_i(t)] <= d.P_max * m.z_on[t]
+        # m.fcr_on = Constraint(m.T, rule=fcr_on_rule)
 
         def fcr_on_block_rule(m, i):
             return m.z_FCR[i] <= m.z_on[i*16]
@@ -291,14 +308,15 @@ class ElectrolyzerModel:
     def _build_objective(self):
         m = self.model
         d = self.data
-        dt = 0.25
+        dt = 0.25 #Because hydrogen production is in kg/h
+        dt_FCR = 16  # FCR blocks are 4 hours, so 16 * 15min intervals
         def obj_rule(m):
             return sum(
                 m.h[t] * d.price_H2[t] * dt  # H2 production [kg/h] * price [EUR/kg] * time [h]
                 - m.P_buy[t] * d.price_DA[t] * dt / 1000  # Electricity buy [kW] * price [EUR/MWh] * time [h] / 1000
                 + m.P_sell[t] * d.price_DA[t] * dt / 1000  # Electricity sell [kW] * price [EUR/MWh] * time [h] / 1000
                 for t in m.T
-            ) + sum(m.r_FCR_block[i] * d.price_FCR[i] * 4  # FCR [kW] * price [EUR/kW] * block time [h]
+            ) + sum(m.r_FCR_block[i] * d.price_FCR[i] * dt_FCR  # FCR [kW] * price [EUR/kW] * block time [h]
                     for i in m.I)
         m.obj = Objective(rule=obj_rule, sense=maximize)
 
@@ -321,17 +339,106 @@ class ElectrolyzerModel:
         self.results.has_solution = (tc == TerminationCondition.optimal)
 
         if not self.results.has_solution:
+            print("Computing IIS...")
+            solver = SolverFactory('gurobi')
+            solver.options['IISMethod'] = 1
+            solver.solve(self.model, tee=True, symbolic_solver_labels=True)
+            return
+        
+        if not self.results.has_solution:
+            print("Model is infeasible; debugging constraint values...")
+            self.debug_constraints()
             return
 
+
         self._save_results()
+
+    def debug_constraints(self):
+        m = self.model
+        print("\n=== CONSTRAINT FEASIBILITY CHECK ===")
+        for cname, c in m.component_map(Constraint).items():
+            print(f"\n--- {cname} ---")
+            for idx in c:
+                con = c[idx]
+                try:
+                    val = value(con.body)
+                    lb = con.lower
+                    ub = con.upper
+                    if lb is not None and val < lb - 1e-6:
+                        print(f"{cname}[{idx}] violates LOWER bound: {val} < {lb}")
+                    if ub is not None and val > ub + 1e-6:
+                        print(f"{cname}[{idx}] violates UPPER bound: {val} > {ub}")
+                except:
+                    # can't evaluate (often because no solution) – still useful to see which ones fail
+                    pass
+    # def debug_constraints(self):
+    #     print("\n=== INFEASIBILITY DIAGNOSIS ===")
+    #     m = self.model
+        
+    #     constraint_counts = {}
+    #     violated_constraints = []
+        
+    #     for cname, c in m.component_map(Constraint).items():
+    #         constraint_counts[cname] = len(c)
+            
+    #         for idx in c:
+    #             try:
+    #                 body_value = c[idx].body()
+    #                 lb = c[idx].lower
+    #                 ub = c[idx].upper
+                    
+    #                 # Check if constraint is violated
+    #                 is_violated = False
+    #                 if lb is not None and body_value < lb - 1e-6:
+    #                     is_violated = True
+    #                     violation = lb - body_value
+    #                     violation_type = "LOWER BOUND"
+    #                 elif ub is not None and body_value > ub + 1e-6:
+    #                     is_violated = True
+    #                     violation = body_value - ub
+    #                     violation_type = "UPPER BOUND"
+                    
+    #                 if is_violated:
+    #                     violated_constraints.append({
+    #                         'name': cname,
+    #                         'index': idx,
+    #                         'lb': lb,
+    #                         'value': body_value,
+    #                         'ub': ub,
+    #                         'type': violation_type,
+    #                         'violation': violation
+    #                     })
+    #             except Exception as e:
+    #                 pass
+        
+    #     # Print summary
+    #     print(f"\nTotal constraints: {sum(constraint_counts.values())}")
+    #     print(f"\nConstraints by type:")
+    #     for cname, count in sorted(constraint_counts.items()):
+    #         print(f"  {cname}: {count} instances")
+        
+    #     # Print violations
+    #     if violated_constraints:
+    #         print(f"\n=== VIOLATED CONSTRAINTS ({len(violated_constraints)} violations) ===")
+    #         for vc in violated_constraints[:20]:  # Show first 20 violations
+    #             print(f"\n{vc['name']}[{vc['index']}] ({vc['type']}):")
+    #             print(f"  LB={vc['lb']}, Value={vc['value']:.6f}, UB={vc['ub']}")
+    #             print(f"  Violation: {vc['violation']:.6f}")
+    #         if len(violated_constraints) > 20:
+    #             print(f"\n... and {len(violated_constraints) - 20} more violations")
+    #     else:
+    #         print("\nNo constraint violations detected (infeasibility may be in variable bounds or feasible region)")
+
 
     def _save_results(self):
         m = self.model
         self.results.h = [value(m.h[t]) for t in m.T]
         self.results.storage = [value(m.storage[t]) for t in m.T]
         self.results.z_on = [value(m.z_on[t]) for t in m.T]  # On/off status
+        self.results.z_sb = [value(m.z_sb[t]) for t in m.T]  # Standby status
+        self.results.z_off = [value(m.z_off[t]) for t in m.T]  # Off status
         self.results.P_buy = [value(m.P_buy[t]) for t in m.T]  # Electricity bought
         self.results.P_sell = [value(m.P_sell[t]) for t in m.T]  # Electricity sold
         self.results.P_curt = [value(m.P_curt[t]) for t in m.T]  # Curtailed power
         self.results.r_FCR_block = [value(m.r_FCR_block[i]) for i in m.I]  # FCR block power
-        self.results.P_curt = [value(m.P_curt[t]) for t in m.T]  # Curtailed power
+
