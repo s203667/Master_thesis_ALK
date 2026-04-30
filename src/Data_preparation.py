@@ -28,46 +28,46 @@ class DataPreparationCSV:
     
     def prepare_wind_data(self):
         # --- CACHE PATH --- #
-        BASE_DIR = os.path.dirname(os.path.abspath(__file__))  # <<< REWRITE >>>
-        cache_dir = os.path.abspath(os.path.join(BASE_DIR, "..", "data", "cache"))  # <<< REWRITE >>>
-        os.makedirs(cache_dir, exist_ok=True)  # <<< REWRITE >>>
-        cache_file = os.path.join(cache_dir, "wmr_15min_cached.csv")  # <<< REWRITE >>>
+        BASE_DIR = os.path.dirname(os.path.abspath(__file__))  #
+        cache_dir = os.path.abspath(os.path.join(BASE_DIR, "..", "data", "cache"))  # 
+        os.makedirs(cache_dir, exist_ok=True)  # 
+        cache_file = os.path.join(cache_dir, "wmr_15min_cached.csv")  # 
 
         # --- LOAD CACHE IF EXISTS --- #
-        if os.path.exists(cache_file):  # <<< REWRITE >>>
-            print("Loading cached WMR data...")  # <<< REWRITE >>>
-            df = pd.read_csv(cache_file, parse_dates=["time"], index_col="time")  # <<< REWRITE >>>
-            return df.loc[self.start_date:self.end_date]  # <<< REWRITE >>>
+        if os.path.exists(cache_file):  # 
+            print("Loading cached WMR data...")  # 
+            df = pd.read_csv(cache_file, parse_dates=["time"], index_col="time")  # 
+            return df.loc[self.start_date:self.end_date]  # 
 
 
-        print("Processing raw WMR data...")  # <<< REWRITE >>>
+        print("Processing raw WMR data...")  # 
         data = pd.DataFrame()
 
         # --- 2016 JAN–JUN --- #
-        df = load_csv_data(  # <<< REWRITE >>>
+        df = load_csv_data(  # 
             "Ørsted Confidential Information - SCADA_WMR_2016_JAN_JUN.csv",
             sep=";"
         )
-        df["time"] = datetime(1900, 1, 1)  # <<< REWRITE >>>
+        df["time"] = datetime(1900, 1, 1)  # 
 
-        for sn in df["StationName"].unique():  # <<< REWRITE >>>
-            mask = df["StationName"] == sn  # <<< REWRITE >>>
-            df.loc[mask, "time"] = pd.date_range(  # <<< REWRITE >>>
+        for sn in df["StationName"].unique():  # 
+            mask = df["StationName"] == sn  # 
+            df.loc[mask, "time"] = pd.date_range(  # 
                 start=datetime(2016, 1, 1),
                 freq="10min",
                 periods=mask.sum()
             )
 
-        data = pd.concat([data, df])  # <<< REWRITE >>>
+        data = pd.concat([data, df])  # 
         
         # --- REMAINING FILES --- #
-        files_and_formats = [  # <<< REWRITE >>>
+        files_and_formats = [  # 
             ("Ørsted Confidential Information - SCADA_WMR_2016_JUL_DEC.csv", "%Y-%m-%d %H:%M:%S.%f"),
             ("Ørsted Confidential Information - SCADA_WMR_2017_JAN_JUN.csv", "%m/%d/%Y %H:%M:%S "),
             ("Ørsted Confidential Information - SCADA_WMR_2017_JUL_DEC.csv", "%Y-%m-%d %H:%M:%S.%f"),
         ]
 
-        for file, fmt in files_and_formats:  # <<< REWRITE >>>
+        for file, fmt in files_and_formats:  # 
             df = load_csv_data(file)
             df["time"] = pd.to_datetime(df["TimeStamp"], format=fmt)
             data = pd.concat([data, df])
@@ -95,9 +95,16 @@ class DataPreparationCSV:
             .bfill()
 )
 
+        # Compute largest day-over-day power difference (96 timesteps = 24 hours in 15-min intervals)
+        power = data_15min['wtc_ActPower_mean'].values
+        if len(power) > 96:
+            day_diffs = np.abs(power[96:] - power[:-96])
+            max_day_diff = day_diffs.max()
+            print(f"Largest day-over-day power difference: {max_day_diff}")
+
         # --- SAVE CACHE --- #
-        data_15min.to_csv(cache_file)  # <<< REWRITE >>>
-        print("Cache saved")  # <<< REWRITE >>>
+        data_15min.to_csv(cache_file)  # 
+        print("Cache saved")  # 
 
 
         return data_15min.loc[self.start_date:self.end_date]
@@ -262,13 +269,13 @@ class DataPreparationCSV:
 
 
         # --- FINAL DF FORMAT --- #
-        df = pd.DataFrame({  # <<< REWRITE >>>
-            "time": wind_data.index,  # <<< REWRITE >>>
-            "wind_speed[m/s]": wind_data["wtc_AcWindSp_mean"],  # <<< REWRITE >>>
-            "wind_power[kW]": wind_data["wtc_ActPower_mean"],  # <<< REWRITE >>>
+        df = pd.DataFrame({  # 
+            "time": wind_data.index,  # 
+            "wind_speed[m/s]": wind_data["wtc_AcWindSp_mean"],  # 
+            "wind_power[kW]": wind_data["wtc_ActPower_mean"],  # 
         })
 
-        df = df.reset_index(drop=True)  # <<< REWRITE >>>
+        df = df.reset_index(drop=True)  # 
 
         # Return all prepared data
         return {
@@ -286,4 +293,13 @@ if __name__ == "__main__":
         fcr_file_name="FcrDK1_24-25.csv",
         year_mapping={2016: 2024, 2017: 2025}  # Align 2016→2024, 2017→2025
     )
+    
+    # Calculate and print largest day-over-day power difference
+    wind_data = prep.data['wind']
+    power = wind_data['wtc_ActPower_mean'].values
+    if len(power) > 96:
+        day_diffs = np.abs(power[96:] - power[:-96])
+        max_day_diff = day_diffs.max()
+        print(f"Largest day-over-day power difference: {max_day_diff}")
+
 

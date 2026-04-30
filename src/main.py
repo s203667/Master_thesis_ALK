@@ -11,7 +11,7 @@ import matplotlib.pyplot as plt
 print("Preparing data...")
 prep = DataPreparationCSV(
     start_date="2016-01-01",
-    end_date="2016-10-15",
+    end_date="2016-01-04",
     el_price_file_name="Elspotprices_16-17.csv", 
     wind_file_name="",  # Update if data_prep changes
     fcr_file_name="FcrDK1_24-25.csv",  
@@ -45,7 +45,7 @@ A_s, B_s, P_seg_min, P_seg_max, P_total, m_dot = generate_piecewise(
     p_out=45,
     N_stacks=40,
     N_cell=250,
-    n_segments=2,
+    n_segments=3,
     plot=True  # Set to True to see plot
 )
 
@@ -74,12 +74,26 @@ P_min = 600.0      # Minimum power [kW] #CHANGE###
 P_max = 4000.0  # Maximum power [kW] (adjust based on system)
 P_sb = 650.0     # Standby power [kW] #CHANGE###
 
+#Real data
+wind_real = wind
+price_real = price_DA
+
+#Add "Forecast" that is just the day before repeated
+lag = 96  # 1 day
+
+wind_forecast = np.roll(wind_real, lag)
+price_forecast = np.roll(price_real, lag)
+
+# For the first day, fill with actual values (or zeros)
+wind_forecast[:lag] = wind_real[:lag]
+price_forecast[:lag] = price_real[:lag]
+
 print("NaNs in FCR price:", np.isnan(price_FCR).sum())
 print("NaNs in FCR volume:", np.isnan(FCR_volume).sum())
 
 #r_FCR_block = 0  ####TEMPORARILY WHILE TESTING #####
 # Storage parameters
-storage_max = 1000.0     # Max storage [kg]
+storage_max = 500.0     # Max storage [kg]
 storage_initial = 0.0     # Initial storage [kg]
 N_down = 3             # Downtime in 15min intervals, adjust as needed
 
@@ -90,15 +104,19 @@ z_on_state = 1
 P_prev = 0
 
 results_all = []
+
 # --- SINGLE-WINDOW DEBUG MODEL (192 steps) ---
 
+# h_full = None
 # # Full horizon = all timesteps in your data (here: 2016-01-01 to 2016-01-03)
 # H_eff = len(wind)          # should be 192 for 2 days at 15-min resolution
 # S = len(A_s)
 
 # # Time-dependent slices
-# wind_slice = wind[:H_eff]
-# price_slice = price_DA[:H_eff]
+# wind_slice_real = wind_real[t0:t0 + step_eff]
+# price_slice_real = price_real[t0:t0 + step_eff]
+# wind_slice_forecast = wind_forecast[t0:t0 + H_eff]
+# price_slice_forecast = price_forecast[t0:t0 + H_eff]
 # h2_price_slice = np.full(H_eff, 5.5)
 
 # # FCR blocks (4-hour blocks = 16 timesteps)
@@ -117,12 +135,12 @@ results_all = []
 #     T=H_eff,
 #     S=S,
 #     I=I_eff,
-#     wind=wind_slice,
-#     price_DA=price_slice,
+#     wind = wind_slice_forecast,
+#     price_DA = price_slice_forecast,
 #     price_H2=h2_price_slice,
 #     price_FCR=price_FCR_slice,
 #     P_min=P_min,
-#     P_max=P_max,
+#     P_max=P_max,    
 #     P_sb=P_sb,
 #     P_seg_min=P_seg_min,
 #     P_seg_max=P_seg_max,
@@ -137,33 +155,43 @@ results_all = []
 #     P_prev=P_prev,
 # )
 
-# model = ElectrolyzerModel(input_data)
-# model.run()
+# model_full = ElectrolyzerModel(input_data)
+# model_full.run()
 
 # step_eff = min(step, H_eff)
-# storage_state = model.results.storage[step_eff - 1]
+# storage_state = model_full.results.storage[step_eff - 1]
 
-# if getattr(model.results, "has_solution", False):
+# if getattr(model_full.results, "has_solution", False):
 #     print("Single-window model feasible")
-#     print("Total H2:", sum(model.results.h))
+#     print("Total H2:", sum(model_full.results.h))
 
-#     print("First 20 z_on:", model.results.z_on[:20])
-#     print("First 20 storage:", model.results.storage[:20])
-#     print("First 20 H2:", model.results.h[:20])
+#     print("First 20 z_on:", model_full.results.z_on[:20])
+#     print("First 20 storage:", model_full.results.storage[:20])
+#     print("First 20 H2:", model_full.results.h[:20])
 # else:
 #     step_eff = min(step, H_eff)
-#     storage_state = model.results.storage[step_eff - 1]
+#     storage_state = model_full.results.storage[step_eff - 1]
 #     print("Single-window model feasible")
-#     print("Total H2:", sum(model.results.h))
+#     print("Total H2:", sum(model_full.results.h))
+
+# if model_full.results.has_solution:
+#     h_full = np.array(model_full.results.h)
+
+# h_roll = None
 
 while t0 < len(wind):
 
     # --- 1. Effective horizon ---
     H_eff = min(H, len(wind) - t0)
 
+    # --- 1b. Implemented part ---
+    step_eff = min(step, H_eff)
+
     # --- 2. Slice ALL time-dependent data consistently ---
-    wind_slice = wind[t0:t0 + H_eff]
-    price_slice = price_DA[t0:t0 + H_eff]
+    wind_slice_real = wind_real[t0:t0 + step_eff]
+    price_slice_real = price_real[t0:t0 + step_eff]
+    wind_slice_forecast = wind_forecast[t0:t0 + H_eff]
+    price_slice_forecast = price_forecast[t0:t0 + H_eff]
     h2_price_slice = np.full(H_eff, 5.5)
 
     # --- 3. Handle block data (FCR) carefully ---
@@ -181,8 +209,8 @@ while t0 < len(wind):
         T=H_eff,
         S=S,
         I=I_eff,
-        wind=wind_slice,
-        price_DA=price_slice,
+        wind=wind_slice_forecast,
+        price_DA=price_slice_forecast,
         price_H2=h2_price_slice,
         price_FCR=price_FCR_slice,
         P_min=P_min,
@@ -203,12 +231,8 @@ while t0 < len(wind):
 
     model = ElectrolyzerModel(input_data)
     model.run()
-    # skipped = 0
-    # if not getattr(model.results, "has_solution", False):
-    #     print(f"INFEASIBLE window at t0={t0}")
-    #     skipped += 1
-    #     t0 += step
-    #     continue
+    print(f"\n--- Window starting at t0={t0} ---")
+    print(f"  storage_initial passed to model: {storage_state}")
     
     if not model.results.has_solution:
         print("Single-window model infeasible at t0=0")
@@ -223,28 +247,35 @@ while t0 < len(wind):
         model.model.P_seg[step_eff - 1, s].value
         for s in model.model.S
     )
-    load = []
-    deficit_realized = []
 
-    for t in model.model.T:
-        P_load_t = sum(
-            model.model.P_seg[t, s].value for s in model.model.S
-        ) + model.model.P_sb[t].value
+    if model.results.has_solution:
+        step_eff = min(step, H_eff)
+        storage_state = model.results.storage[step_eff - 1]
+        print(f"  storage at end of window: {storage_state}")
 
-        wind_t = model.data.wind[t]
-
-        load.append(P_load_t)
-        deficit_realized.append(P_load_t - wind_t)
-    
-
-    results_all.append(model.results)
+    results_all.append({
+    "h": model.results.h[:step_eff],
+    "storage": model.results.storage[:step_eff],
+    "z_on": model.results.z_on[:step_eff],
+    "P_buy": model.results.P_buy[:step_eff],
+    "P_sell": model.results.P_sell[:step_eff],
+    "r_FCR_block": model.results.r_FCR_block[:step_eff],
+    "wind_real": wind_slice_real,
+    "price_real": price_slice_real,
+    "wind_forecast": wind_slice_forecast[:step_eff],
+    "price_forecast": price_slice_forecast[:step_eff],
+})
 
     # --- 6. Move forward ---
     t0 += step_eff
 
+
+    
+
 # Access results
-print("Hydrogen production:", [h for result in results_all for h in result.h[:5]])  # First 5 values
-print("Storage levels:", [storage for result in results_all for storage in result.storage[:5]])
+print("Hydrogen production:", [h for result in results_all for h in result["h"][:5]])
+  # First 5 values
+print("Storage levels:", [storage for result in results_all for storage in result["storage"][:5]])
 print("wind power last ten periods:", wind[:10])
 print("Maximum wind power:", np.max(wind))
 print("Final t0:", t0)
@@ -256,9 +287,9 @@ print(f"FCR_volume_slice length: {len(FCR_volume_slice)}")
 print("\n--- DEBUG ---")
 print(f"Number of results: {len(results_all)}")
 if results_all:
-    print(f"First result z_on values (first 20):", results_all[0].z_on[:20])
-    print(f"First result z_on unique values:", set(results_all[0].z_on))
-    print(f"First result z_on dtype: {type(results_all[0].z_on[0])}")
+    print(f"First result z_on values (first 20):", results_all[0]["z_on"][:20])
+    print(f"First result z_on unique values:", set(results_all[0]["z_on"]))
+    print(f"First result z_on dtype: {type(results_all[0]['z_on'][0])}")
 
 def reconstruct_full_timeseries(results_all, step):
     all_h = []
@@ -271,19 +302,19 @@ def reconstruct_full_timeseries(results_all, step):
     for i, result in enumerate(results_all):
         # Determine how many steps this window contributes
         if i == len(results_all) - 1:
-            H_res = len(result.h)   # last window: take all
+            H_res = len(result["h"])   # last window: take all
         else:
             H_res = step            # earlier windows: take only first `step`
 
         # Append exactly the used part
-        all_h.extend(result.h[:H_res])
-        all_storage.extend(result.storage[:H_res])
-        all_z_on.extend(result.z_on[:H_res])
-        all_p_buy.extend(result.P_buy[:H_res])
-        all_p_sell.extend(result.P_sell[:H_res])
+        all_h.extend(result["h"][:H_res])
+        all_storage.extend(result["storage"][:H_res])
+        all_z_on.extend(result["z_on"][:H_res])
+        all_p_buy.extend(result["P_buy"][:H_res])
+        all_p_sell.extend(result["P_sell"][:H_res])
 
         # Expand FCR blocks to 16 timesteps each
-        for block_value in result.r_FCR_block:
+        for block_value in result["r_FCR_block"]:
             all_fcr_blocks.extend([block_value] * 16)
 
     return (
@@ -303,6 +334,7 @@ def downsample(arr, factor=20):
 all_h, all_storage, all_z_on, all_p_buy, all_p_sell, all_fcr = \
     reconstruct_full_timeseries(results_all, step)
 
+h_roll = all_h.copy()
 print(f"Full timeline length: {len(all_h)} timesteps")
 
 # --- DEBUG CHECK ---
@@ -366,88 +398,65 @@ plt.grid(True, alpha=0.3)
 plt.tight_layout()
 plt.show()
 
-# # Analyze results
-# # Properly flatten ALL rolling horizon results first
-# all_h = []
-# all_storage = []
-# all_z_on = []
-# all_p_buy = []
-# all_p_sell = []
-# all_fcr_blocks = []
+wind_real_full = np.concatenate([r["wind_real"] for r in results_all])
+wind_forecast_full = np.concatenate([r["wind_forecast"] for r in results_all])
 
-# for i, result in enumerate(results_all):
-#     if i == len(results_all) - 1:
-#         # Last result: take all values
-#         all_h.extend(result.h)
-#         all_storage.extend(result.storage)
-#         all_z_on.extend(result.z_on)
-#         all_p_buy.extend(result.P_buy)
-#         all_p_sell.extend(result.P_sell)
-#         all_fcr_blocks.extend(result.r_FCR_block)
-#     else:
-#         # Earlier results: take only first `step` values to avoid overlap
-#         all_h.extend(result.h[:step])
-#         all_storage.extend(result.storage[:step])
-#         all_z_on.extend(result.z_on[:step])
-#         all_p_buy.extend(result.P_buy[:step])
-#         all_p_sell.extend(result.P_sell[:step])
-#         all_fcr_blocks.extend(result.r_FCR_block)  # FCR is always block-based, no slicing
+forecast_error = wind_real_full - wind_forecast_full
 
-# # Plot H2 production and storage with properly flattened data
-# plt.figure(figsize=(12,6))
-# plt.subplot(2,1,1)
-# plt.plot(all_h[:500], linewidth=0.8)
-# plt.title('H2 Production (kg/h)')
-# plt.ylabel('Production (kg/h)')
-# plt.grid(True, alpha=0.3)
-# plt.subplot(2,1,2)
-# plt.plot(all_storage[:500], linewidth=0.8)
-# plt.title('Storage Level (kg)')
-# plt.ylabel('Storage (kg)')
-# plt.xlabel('Timestep (15 min intervals)')
-# plt.grid(True, alpha=0.3)
-# plt.tight_layout()
-# plt.show()
+plt.plot(forecast_error)
+plt.title("Wind forecast error")
+plt.xlabel("Timestep")
+plt.ylabel("Forecast error (kW)")
+plt.grid(True)
+plt.show()
 
-# # Check operation stats
-# on_periods = sum([z for result in results_all for z in result.z_on])
-# total_h2 = sum([h for result in results_all for h in result.h])
-# print(f"Electrolyzer on for {on_periods} periods")
-# print(f"Total H2 produced: {total_h2:.1f} kg")
+# --- COMPUTE FULL-SIMULATION OBJECTIVE ---
+dt = 0.25          # 15 minutes
+dt_FCR = 4         # FCR blocks are 4 hours
 
-# # Print sum of first 500 timesteps
-# print(f"\nFirst 500 timesteps summary:")
-# print(f"Total H2 production: {sum(all_h[:500]):.1f} kg")
-# print(f"On periods: {sum(all_z_on[:500]):.0f} out of 500")
+# Slice price arrays to match lengths
+price_H2_full = price_H2[:len(all_h)]
+price_DA_full = price_DA[:len(all_h)]
 
-# # Plot more - using already flattened data
-# plt.figure(figsize=(12,8))
+# FCR price must match number of blocks
+price_FCR_full = price_FCR[:len(all_fcr)]
 
-# plt.subplot(3,1,1)
-# plt.plot(all_z_on[:500], linewidth=0.8)
-# plt.title('Electrolyzer On/Off')
-# plt.ylabel('Status')
-# plt.grid(True, alpha=0.3)
+total_revenue_H2 = np.sum(all_h * price_H2_full * dt)
+total_cost_buy   = np.sum(all_p_buy * price_DA_full * dt / 1000)
+total_rev_sell   = np.sum(all_p_sell * price_DA_full * dt / 1000)
+total_rev_FCR    = np.sum(all_fcr * price_FCR_full * dt_FCR)
 
-# plt.subplot(3,1,2)
-# plt.plot(all_p_buy[:500], label='Buy', linewidth=0.8)
-# plt.plot(all_p_sell[:500], label='Sell', linewidth=0.8)
-# plt.legend()
-# plt.title('Electricity Trading (kW)')
-# plt.ylabel('Power (kW)')
-# plt.grid(True, alpha=0.3)
+total_profit = total_revenue_H2 - total_cost_buy + total_rev_sell + total_rev_FCR
 
-# # Expand FCR block values to per-time-step (1 FCR block = 16 timesteps = 4 hours)
-# fcr_per_t = []
-# for fcr_value in all_fcr_blocks:
-#     fcr_per_t.extend([fcr_value] * 16)
+print("\n====================")
+print(" FULL SIMULATION PROFIT")
+print("====================")
+print(f"Hydrogen revenue: {total_revenue_H2:,.0f} EUR")
+print(f"Electricity buy cost: {total_cost_buy:,.0f} EUR")
+print(f"Electricity sell revenue: {total_rev_sell:,.0f} EUR")
+print(f"FCR revenue: {total_rev_FCR:,.0f} EUR")
+print("--------------------")
+print(f"TOTAL PROFIT: {total_profit:,.0f} EUR")
+print("====================\n")
 
-# plt.subplot(3,1,3)
-# plt.plot(fcr_per_t[:500], linewidth=0.8)
-# plt.title('FCR Power (kW)')
-# plt.ylabel('Power (kW)')
-# plt.xlabel('Timestep (15 min intervals)')
-# plt.grid(True, alpha=0.3)
+# --- CHECK MAX REAL WIND JUMP ---
+wind_real_full = np.concatenate([r["wind_real"] for r in results_all])
 
-# plt.tight_layout()
-# plt.show()
+wind_diff = np.abs(np.diff(wind_real_full))
+max_jump = np.max(wind_diff)
+
+print("\n====================")
+print(" WIND DATA CHECK")
+print("====================")
+print(f"Max real wind jump between timesteps: {max_jump:,.0f} kW")
+print(f"Mean jump: {np.mean(wind_diff):,.0f} kW")
+print("====================\n")
+
+
+max_forecast_error = np.max(np.abs(forecast_error))
+
+print("====================")
+print(" FORECAST ERROR CHECK")
+print("====================")
+print(f"Max forecast error: {max_forecast_error:,.0f} kW")
+print("====================\n")

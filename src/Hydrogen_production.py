@@ -233,8 +233,6 @@ if __name__ == "__main__":
 
     Nm3_to_kg = 0.0899                  # conversion factor
     M_H2 = 2.0158e-3 # kg/mol
-    N_cell = 250
-    N_stacks = 40
     U_tn_eq, U_HHV = U_tn(T_static, p, W_t=0.30, w_z=0.0)
 
     # operating range
