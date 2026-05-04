@@ -10,12 +10,11 @@ import matplotlib.pyplot as plt
 # --- DATA PREPARATION --- #
 print("Preparing data...")
 prep = DataPreparationCSV(
-    start_date="2016-01-01",
-    end_date="2016-01-04",
-    el_price_file_name="Elspotprices_16-17.csv", 
-    wind_file_name="",  # Update if data_prep changes
-    fcr_file_name="FcrDK1_24-25.csv",  
-    year_mapping={2016: 2024, 2017: 2025}  # Align 2016→2024, 2017→2025
+    start_date="2025-03-05",
+    end_date="2025-03-10",
+    el_price_file_name="DayAheadPrices.csv", 
+    wind_file_name="WindProd5MinRealtime.csv",  # Update if data_prep changes
+    fcr_file_name="FcrDK1.csv",  
 )
 data = prep.data
 
@@ -43,7 +42,7 @@ A_s, B_s, P_seg_min, P_seg_max, P_total, m_dot = generate_piecewise(
     A_cell=0.0625,
     p=40,
     p_out=45,
-    N_stacks=40,
+    N_stacks=40*20,
     N_cell=250,
     n_segments=3,
     plot=True  # Set to True to see plot
@@ -63,15 +62,15 @@ S = len(A_s)      # Number of segments
 I = len(fcr_df)   # Number of FCR blocks (4-hour intervals)
 
 # Data
-wind = wind_df['wtc_ActPower_mean'].values  # Wind power [kW]
+wind = wind_df['wind_kW'].values  # Wind power [kW]
 price_DA = el_price_df['el_price[EUR/MWh]'].values  # Day-ahead price [EUR/MWh]
 price_H2 = np.full(H, 5.5)  # Hydrogen price [EUR/kg], constant for now, from European Hydrogen Observatory
 price_FCR = fcr_df['price_FCR'].values  # FCR price [EUR/kW]
 FCR_volume = fcr_df['FCR_volume'].values # FCR volume [kW], using "up" as example
 grid_cap = 4100.0  # Max grid power [kW], adjust as needed
 # Electrolyzer parameters
-P_min = 600.0      # Minimum power [kW] #CHANGE###
-P_max = 4000.0  # Maximum power [kW] (adjust based on system)
+P_min = 6.0      # Minimum power [kW] #CHANGE###
+P_max = 100000.0  # Maximum power [kW] (adjust based on system)
 P_sb = 650.0     # Standby power [kW] #CHANGE###
 
 #Real data
@@ -93,14 +92,14 @@ print("NaNs in FCR volume:", np.isnan(FCR_volume).sum())
 
 #r_FCR_block = 0  ####TEMPORARILY WHILE TESTING #####
 # Storage parameters
-storage_max = 500.0     # Max storage [kg]
+storage_max = 2000.0     # Max storage [kg]
 storage_initial = 0.0     # Initial storage [kg]
 N_down = 3             # Downtime in 15min intervals, adjust as needed
 
 t0 = 0
 
 storage_state = storage_initial
-z_on_state = 1
+z_on_state = 0
 P_prev = 0
 
 results_all = []
@@ -259,6 +258,7 @@ while t0 < len(wind):
     "z_on": model.results.z_on[:step_eff],
     "P_buy": model.results.P_buy[:step_eff],
     "P_sell": model.results.P_sell[:step_eff],
+    "P_curt": model.results.P_curt[:step_eff],
     "r_FCR_block": model.results.r_FCR_block[:step_eff],
     "wind_real": wind_slice_real,
     "price_real": price_slice_real,
@@ -370,26 +370,26 @@ plt.show()
 # --- FULL-YEAR PLOTS (DOWNSAMPLED) ---
 plt.figure(figsize=(14,10))
 
-plt.subplot(4,1,1)
-plt.plot(downsample(all_z_on, 20))
-plt.title("Electrolyzer On/Off (downsampled)")
-plt.grid(True, alpha=0.3)
+# plt.subplot(4,1,1)
+# plt.plot(downsample(all_z_on, 20))
+# plt.title("Electrolyzer On/Off (downsampled)")
+# plt.grid(True, alpha=0.3)
 
-plt.subplot(4,1,2)
+plt.subplot(4,1,1)
 plt.plot(downsample(all_h, 20))
 plt.plot(downsample(all_storage, 20))
 plt.legend(["H2 Production", "Storage Level"])
 plt.title("H2 Production (kg/h, downsampled)")
 plt.grid(True, alpha=0.3)
 
-plt.subplot(4,1,3)
+plt.subplot(4,1,2)
 plt.plot(downsample(all_p_buy, 20), label="Buy")
 plt.plot(downsample(all_p_sell, 20), label="Sell")
 plt.legend()
 plt.title("Electricity Trading (downsampled)")
 plt.grid(True, alpha=0.3)
 
-plt.subplot(4,1,4)
+plt.subplot(4,1,3)
 plt.plot(downsample(all_fcr, 20))
 plt.title("FCR Power (downsampled)")
 plt.grid(True, alpha=0.3)
@@ -407,7 +407,7 @@ plt.plot(forecast_error)
 plt.title("Wind forecast error")
 plt.xlabel("Timestep")
 plt.ylabel("Forecast error (kW)")
-plt.grid(True)
+plt.grid(True, alpha=0.3)
 plt.show()
 
 # --- COMPUTE FULL-SIMULATION OBJECTIVE ---
@@ -421,23 +421,23 @@ price_DA_full = price_DA[:len(all_h)]
 # FCR price must match number of blocks
 price_FCR_full = price_FCR[:len(all_fcr)]
 
-total_revenue_H2 = np.sum(all_h * price_H2_full * dt)
-total_cost_buy   = np.sum(all_p_buy * price_DA_full * dt / 1000)
-total_rev_sell   = np.sum(all_p_sell * price_DA_full * dt / 1000)
-total_rev_FCR    = np.sum(all_fcr * price_FCR_full * dt_FCR)
+# total_revenue_H2 = np.sum(all_h * price_H2_full * dt)
+# total_cost_buy   = np.sum(all_p_buy * price_DA_full * dt / 1000)
+# total_rev_sell   = np.sum(all_p_sell * price_DA_full * dt / 1000)
+# total_rev_FCR    = np.sum(all_fcr * price_FCR_full * dt_FCR)
 
-total_profit = total_revenue_H2 - total_cost_buy + total_rev_sell + total_rev_FCR
+# total_profit = total_revenue_H2 - total_cost_buy + total_rev_sell + total_rev_FCR
 
-print("\n====================")
-print(" FULL SIMULATION PROFIT")
-print("====================")
-print(f"Hydrogen revenue: {total_revenue_H2:,.0f} EUR")
-print(f"Electricity buy cost: {total_cost_buy:,.0f} EUR")
-print(f"Electricity sell revenue: {total_rev_sell:,.0f} EUR")
-print(f"FCR revenue: {total_rev_FCR:,.0f} EUR")
-print("--------------------")
-print(f"TOTAL PROFIT: {total_profit:,.0f} EUR")
-print("====================\n")
+# print("\n====================")
+# print(" FULL SIMULATION PROFIT")
+# print("====================")
+# print(f"Hydrogen revenue: {total_revenue_H2:,.0f} EUR")
+# print(f"Electricity buy cost: {total_cost_buy:,.0f} EUR")
+# print(f"Electricity sell revenue: {total_rev_sell:,.0f} EUR")
+# print(f"FCR revenue: {total_rev_FCR:,.0f} EUR")
+# print("--------------------")
+# print(f"TOTAL PROFIT: {total_profit:,.0f} EUR")
+# print("====================\n")
 
 # --- CHECK MAX REAL WIND JUMP ---
 wind_real_full = np.concatenate([r["wind_real"] for r in results_all])

@@ -30,8 +30,8 @@ def simple_h2_prod(eff_kWh_per_Nm3=3.86):
 def electrolyzer_UI_curve(
         I_range,
         T=80.0,          # °C
-        p=1.0,           # bar (or same units as in your fitted d2)
-        A=0.0625,          # m²
+        p=1.0,           # bar (or same units as in fitted d2)
+        A=0.0625,          # m^2
         r1 = 0.7*4.45153E-05,#Changed fron andrea Gloppen. Based on Hysata 290 mOhm/cm2 at 25 °C, but no reason for the scale yet. 
         r2 = 0.7*6.88874E-09,
         d1 = 0.7*-3.12996E-06,
