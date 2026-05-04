@@ -1,6 +1,7 @@
 from pyomo.environ import *
 #import hydrogen_production as hp
 import numpy as np
+from pyomo.opt import TerminationCondition
 
 class Expando:
     pass
@@ -12,8 +13,8 @@ class InputData:
                  P_min, P_max, P_sb,
                  P_seg_min, P_seg_max,
                  A_s, B_s,
-                 storage_max, storage_initial,
-                 N_down, FCR_volume):
+                 storage_max, storage_initial, grid_cap,
+                 N_down, FCR_volume, z_on_prev=0, P_prev=0):
 
         self.T = T              # time steps
         self.S = S              # segments
@@ -38,16 +39,27 @@ class InputData:
 
         self.storage_max = storage_max
         self.storage_initial = storage_initial
+        self.grid_cap = grid_cap
         self.N_down = N_down
         self.P_min_bid = 1000 # Minimum bid size for FCR [kW]
         self.P_max_bid = FCR_volume  # array per block [kW], volumeUP from FCR data, adjust as needed
 
+
+        self.z_on_prev = z_on_prev
+        self.P_prev = P_prev
 class ElectrolyzerModel:
 
     def __init__(self, data: InputData):
         self.data = data
         self.results = Expando()
+        # Default values so model can build
+  
+
         self._build_model()
+
+    def set_initial_state(self, z_on_prev, P_prev):
+        self.z_on_prev = z_on_prev
+        self.P_prev = P_prev
 
     def _build_model(self):
         m = ConcreteModel()
@@ -67,7 +79,7 @@ class ElectrolyzerModel:
 
         m.P_buy = Var(m.T, domain=NonNegativeReals)
         m.P_sell = Var(m.T, domain=NonNegativeReals)
-        m.z_grid_buy = Var(m.T, domain=Binary)
+        m.deficit = Var(m.T, domain=NonNegativeReals)
 
         m.P_curt = Var(m.T, domain=NonNegativeReals)
         m.P_sb = Var(m.T, domain=NonNegativeReals)
@@ -96,8 +108,10 @@ class ElectrolyzerModel:
         m = self.model
         d = self.data
 
-
-        
+        #TESTING FUNCTION; DELETE THIS
+        # def force_on(m, t):
+        #     return m.z_on[t] == 1
+        # m.force_on = Constraint(m.T, rule=force_on)
         ### Map time steps to FCR blocks ##
 
         def map_t_to_i(t):
@@ -113,7 +127,7 @@ class ElectrolyzerModel:
             return m.P_seg[t, s] <= d.P_seg_max[s] * m.z_seg[t, s]
         m.seg_max = Constraint(m.T, m.S, rule=seg_max_rule)
 
-        #Only one segment active
+        #Only one segment active when z_on=1. When z_on=0, all z_seg must be 0 and z_sb has its own constraint
         def one_seg_rule(m, t):
             return sum(m.z_seg[t, s] for s in m.S) == m.z_on[t]
         m.one_seg = Constraint(m.T, rule=one_seg_rule)
@@ -129,7 +143,7 @@ class ElectrolyzerModel:
                 sum(m.P_seg[t, s] for s in m.S)
                 + m.P_sb[t]
                 + m.r_FCR_block[map_t_to_i(t)]
-                <= d.P_max * m.z_on[t]
+                <= d.P_max * (m.z_on[t] + m.z_sb[t])
             )
         m.total_power = Constraint(m.T, rule=total_power_rule)
 
@@ -139,12 +153,13 @@ class ElectrolyzerModel:
                 sum(m.P_seg[t, s] for s in m.S)
                 + m.P_sb[t]
                 -  m.r_FCR_block[map_t_to_i(t)]
-                >= d.P_min * m.z_on[t]
+                >= d.P_min * (m.z_on[t] + m.z_sb[t])
             )
         m.min_load = Constraint(m.T, rule=min_load_rule)
 
         #Hydrogen production
         def h2_rule(m, t):
+            dt = 0.25
             return m.h[t] == sum(d.A_s[s] * m.P_seg[t, s] + d.B_s[s] * m.z_seg[t, s] for s in m.S)
         m.h2_prod = Constraint(m.T, rule=h2_rule)
 
@@ -167,6 +182,7 @@ class ElectrolyzerModel:
                 return Constraint.Skip
             return m.y_shutdown[t] >= m.z_off[t] - m.z_off[t-1]
         m.shutdown_def = Constraint(m.T, rule=shutdown_def)
+        
 
         # Minimum downtime
         def downtime_rule(m, t):
@@ -187,14 +203,17 @@ class ElectrolyzerModel:
             return m.storage[t] <= d.storage_max
         m.storage_bound = Constraint(m.T, rule=storage_bound_rule)
 
+        def h_sell_prod_limit(m, t):
+            if t == 0:
+                return m.h_sell[t] <= m.h[t] + d.storage_initial
+            return m.h_sell[t] <= m.h[t] + m.storage[t-1]  # Can only sell what is produced plus what's in storage
+        m.h_sell_prod_limit = Constraint(m.T, rule=h_sell_prod_limit)
+
+
+
         #--- add storage start and end constraints ---
 
-        #Terminal storage
-        def storage_terminal_rule(m):
-            return m.storage[d.T-1] >= d.storage_initial
-        m.storage_terminal = Constraint(rule=storage_terminal_rule)
-
-        # Power balance
+        # Power balance (P_compressor included in P_seg)
         def power_balance_rule(m, t):
             return (
                 d.wind[t] + m.P_buy[t]
@@ -203,18 +222,30 @@ class ElectrolyzerModel:
                 + m.P_sb[t]
                 + m.P_sell[t]
                 + m.P_curt[t]
+            
             )
         m.power_balance = Constraint(m.T, rule=power_balance_rule)
 
-        # Simultanous grid buy and sell
-        def grid_buy_rule(m, t):
-            return m.P_buy[t] <= d.P_max * m.z_grid_buy[t]
-        m.grid_buy = Constraint(m.T, rule=grid_buy_rule)
 
         def grid_sell_rule(m, t):
-            return m.P_sell[t] <= d.P_max * (1 - m.z_grid_buy[t])
+            return m.P_sell[t] <= d.grid_cap
         m.grid_sell = Constraint(m.T, rule=grid_sell_rule)
 
+        def deficit_rule(m, t):
+            return m.deficit[t] >= (
+                sum(m.P_seg[t, s] for s in m.S)
+                + m.P_sb[t]
+                - d.wind[t]
+            )
+        m.deficit_con = Constraint(m.T, rule=deficit_rule)
+
+        def buy_limit_deficit_rule(m, t):
+            return m.P_buy[t] <= m.deficit[t]
+        m.buy_limit_deficit = Constraint(m.T, rule=buy_limit_deficit_rule)
+
+        def buy_limit_grid_rule(m, t):
+            return m.P_buy[t] <= d.grid_cap
+        m.buy_limit_grid = Constraint(m.T, rule=buy_limit_grid_rule)
 
         def fcr_min_rule(m, i):
             return m.r_FCR_block[i] >= d.P_min_bid * m.z_FCR[i]
@@ -225,19 +256,20 @@ class ElectrolyzerModel:
             return m.r_FCR_block[i] <= upper_bound * m.z_FCR[i]
         m.fcr_max = Constraint(m.I, rule=fcr_max_rule)
 
-        def fcr_activation_rule(m, i):
-            return m.r_FCR_block[i] <= d.P_max * m.z_FCR[i]
-        m.fcr_activation = Constraint(m.I, rule=fcr_activation_rule)
-        # FCR can only be provided when state is on / operating
-        def fcr_on_rule(m, t):
-            return m.r_FCR_block[map_t_to_i(t)] <= d.P_max * m.z_on[t]
-        m.fcr_on = Constraint(m.T, rule=fcr_on_rule)
+
+        def fcr_on_block_rule(m, i):
+            return m.z_FCR[i] <= m.z_on[i*16]
+        m.fcr_on_block = Constraint(m.I, rule=fcr_on_block_rule)
 
         # ramping consraints
         def ramp_up_rule(m, t):
-            dR_up = 20 # MW/15Min #PLACEHOLDER
+            dR_up = 4000 # kW/15Min #PLACEHOLDER
             if t == 0:
-                return Constraint.Skip
+                return (
+                    sum(m.P_seg[0, s] for s in m.S)
+                    - d.P_prev
+                    <= dR_up
+                )
             return (
                 sum(m.P_seg[t, s] for s in m.S)
                 - sum(m.P_seg[t-1, s] for s in m.S)
@@ -246,9 +278,13 @@ class ElectrolyzerModel:
         m.ramp_up = Constraint(m.T, rule=ramp_up_rule)
 
         def ramp_down_rule(m, t):
-            dR_down = 20 # MW/15min #PLACEHOLDER
+            dR_down = 4000 # kW/15min #PLACEHOLDER
             if t == 0:
-                return Constraint.Skip
+                return (
+                    d.P_prev
+                    - sum(m.P_seg[0, s] for s in m.S)
+                    <= dR_down
+                )
             return (
                 sum(m.P_seg[t-1, s] for s in m.S)
                 - sum(m.P_seg[t, s] for s in m.S)
@@ -256,24 +292,49 @@ class ElectrolyzerModel:
             )
         m.ramp_down = Constraint(m.T, rule=ramp_down_rule)
 
+
+        #Rolling horizon constraints:
+        def initial_on_rule(m):
+            return m.z_on[0] == d.z_on_prev
+        m.initial_on = Constraint(rule=initial_on_rule)
+
     def _build_objective(self):
         m = self.model
         d = self.data
-        dt = 0.25
+        dt = 0.25 #Because hydrogen production is in kg/h
+        dt_FCR = 16  # FCR blocks are 4 hours, so 16 * 15min intervals
         def obj_rule(m):
             return sum(
-                m.h[t] * d.price_H2[t] * dt  # H2 production [kg/h] * price [EUR/kg] * time [h]
+                m.h_sell[t] * d.price_H2[t] * dt  # H2 production [kg/h] * price [EUR/kg] * time [h]
                 - m.P_buy[t] * d.price_DA[t] * dt / 1000  # Electricity buy [kW] * price [EUR/MWh] * time [h] / 1000
                 + m.P_sell[t] * d.price_DA[t] * dt / 1000  # Electricity sell [kW] * price [EUR/MWh] * time [h] / 1000
                 for t in m.T
-            ) + sum(m.r_FCR_block[i] * d.price_FCR[i] * 4  # FCR [kW] * price [EUR/kW] * block time [h]
+            ) + sum(m.r_FCR_block[i] * d.price_FCR[i] * dt_FCR  # FCR [kW] * price [EUR/kW] * block time [h]
                     for i in m.I)
         m.obj = Objective(rule=obj_rule, sense=maximize)
 
 
     def run(self):
         solver = SolverFactory('gurobi')
-        solver.solve(self.model, tee=True)
+        solver.options['DualReductions'] = 0  # helps distinguish infeasible vs unbounded
+        results = solver.solve(self.model, tee=True)
+
+        tc = results.solver.termination_condition
+        print("Termination condition:", tc)
+
+        self.results.has_solution = (tc == TerminationCondition.optimal)
+
+        if not self.results.has_solution:
+            print("Computing IIS...")
+            solver = SolverFactory('gurobi')
+            solver.options['IISMethod'] = 1
+            solver.solve(self.model, tee=True, symbolic_solver_labels=True)
+            return
+        
+        if not self.results.has_solution:
+            print("Model is infeasible; debugging constraint values...")
+            self.debug_constraints()
+            return
         self._save_results()
 
     def _save_results(self):
@@ -281,8 +342,10 @@ class ElectrolyzerModel:
         self.results.h = [value(m.h[t]) for t in m.T]
         self.results.storage = [value(m.storage[t]) for t in m.T]
         self.results.z_on = [value(m.z_on[t]) for t in m.T]  # On/off status
+        self.results.z_sb = [value(m.z_sb[t]) for t in m.T]  # Standby status
+        self.results.z_off = [value(m.z_off[t]) for t in m.T]  # Off status
         self.results.P_buy = [value(m.P_buy[t]) for t in m.T]  # Electricity bought
         self.results.P_sell = [value(m.P_sell[t]) for t in m.T]  # Electricity sold
         self.results.P_curt = [value(m.P_curt[t]) for t in m.T]  # Curtailed power
         self.results.r_FCR_block = [value(m.r_FCR_block[i]) for i in m.I]  # FCR block power
-        self.results.P_curt = [value(m.P_curt[t]) for t in m.T]  # Curtailed power
+        self.results.h_sell = [value(m.h_sell[t]) for t in m.T]  # Hydrogen sold
