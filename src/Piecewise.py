@@ -30,7 +30,7 @@ def generate_piecewise(
     # -------------------------
     # 1. Generate nonlinear curve
     # -------------------------
-    P_total, m_dot = hp.electrolyzer_h2_prod_curve(
+    P_total, m_dot, P_stack = hp.electrolyzer_h2_prod_curve(
         T, I_range, A_cell, p, p_out, N_stacks, N_cell
     )
 
@@ -93,4 +93,4 @@ def generate_piecewise(
         plt.legend()
         plt.show()
 
-    return A_s, B_s, P_seg_min, P_seg_max, P_total, m_dot
+    return A_s, B_s, P_seg_min, P_seg_max, P_total, m_dot, P_stack

@@ -12,15 +12,14 @@ class Expando(object):
 class DataPreparationCSV:
     
     def __init__(self, start_date: str, end_date: str, el_price_file_name: str,
-                 wind_file_name: str, fcr_file_name: str, year_mapping: dict = None):
+                 wind_file_name: str, fcr_file_name: str, imbalance_file_name: str):
         
         self.wind_file_name = wind_file_name
         self.el_price_file_name = el_price_file_name
         self.fcr_file_name = fcr_file_name
+        self.imbalance_file_name = imbalance_file_name
         self.start_date = start_date
         self.end_date = end_date
-        # year_mapping: {wind_year: fcr_year} e.g. {2016: 2024, 2017: 2025}
-        self.year_mapping = year_mapping or {}
         
         self.data = self.build()
     
@@ -194,12 +193,21 @@ class DataPreparationCSV:
             return df_fcr_4h.loc[self.start_date:self.end_date]
         return df_fcr_4h
 
+    def prepare_imbalance_data(self):
+
+        df_imb = load_csv_data(self.imbalance_file_name, sep=";", decimal=",")
+        df_imb["time"] = pd.to_datetime(df_imb["TimeDK"])
+        df_imb.set_index("time", inplace=True)
+        df_imb.sort_index(inplace=True)
+
+        return df_imb[["ImbalancePriceEUR"]]
 
     def build(self):
   
         wind_data = self.prepare_wind_data()  # Filtered by date range
         el_price_data = self.prepare_el_price_data()  # Filtered by date range
         FCR_price_data = self.prepare_FCR_data(filter_by_date=True)  # Filtered by date range
+        imbalance_data = self.prepare_imbalance_data()  # Filtered by date range
 
         if FCR_price_data.isna().any().any():
             raise ValueError("NaN values detected in FCR data after alignment!")
@@ -208,7 +216,8 @@ class DataPreparationCSV:
         return {
             'wind': wind_data,
             'el_price': el_price_data,
-            'fcr': FCR_price_data
+            'fcr': FCR_price_data,
+            'imbalance': imbalance_data
         }
 
 # if __name__ == "__main__":

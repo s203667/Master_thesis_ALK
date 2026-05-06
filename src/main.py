@@ -11,16 +11,19 @@ import matplotlib.pyplot as plt
 print("Preparing data...")
 prep = DataPreparationCSV(
     start_date="2025-03-05",
-    end_date="2025-03-10",
+    end_date="2025-03-09",
     el_price_file_name="DayAheadPrices.csv", 
     wind_file_name="WindProd5MinRealtime.csv",  # Update if data_prep changes
     fcr_file_name="FcrDK1.csv",  
+    imbalance_file_name="ImbalancePrice.csv"
 )
 data = prep.data
 
 wind_df = data['wind']
 el_price_df = data['el_price']
 fcr_df = data['fcr']
+imbalance_df = data['imbalance']
+imbalance_price = imbalance_df['ImbalancePriceEUR'].values
 
 print("Data prepared.")
 
@@ -35,7 +38,7 @@ j_mA_cm2 = np.linspace(1, 400, 50)
 j = j_mA_cm2 * 10          # A/m²
 I_range = j * A_cell
 
-A_s, B_s, P_seg_min, P_seg_max, P_total, m_dot = generate_piecewise(
+A_s, B_s, P_seg_min, P_seg_max, P_total, m_dot, P_stack = generate_piecewise(
     hp,
     T=80,
     I_range=I_range,
@@ -69,8 +72,17 @@ price_FCR = fcr_df['price_FCR'].values  # FCR price [EUR/kW]
 FCR_volume = fcr_df['FCR_volume'].values # FCR volume [kW], using "up" as example
 grid_cap = 4100.0  # Max grid power [kW], adjust as needed
 # Electrolyzer parameters
-P_min = 6.0      # Minimum power [kW] #CHANGE###
-P_max = 100000.0  # Maximum power [kW] (adjust based on system)
+P_total, m_dot, P_stack = hp.electrolyzer_h2_prod_curve(
+    T=80,
+    I_range=I_range,
+    A_cell=0.0625,
+    p=40,
+    p_out=45,
+    N_stacks=40*20,
+    N_cell=250
+)
+P_min = min(P_stack)      # Minimum power [kW] #CHANGE###
+P_max = max(P_stack) # Maximum power [kW] (adjust based on system)
 P_sb = 650.0     # Standby power [kW] #CHANGE###
 
 #Real data
@@ -187,11 +199,12 @@ while t0 < len(wind):
     step_eff = min(step, H_eff)
 
     # --- 2. Slice ALL time-dependent data consistently ---
-    wind_slice_real = wind_real[t0:t0 + step_eff]
-    price_slice_real = price_real[t0:t0 + step_eff]
+    wind_slice_real = wind_real[t0:t0 + H_eff]
+    price_slice_real = price_real[t0:t0 + H_eff]
     wind_slice_forecast = wind_forecast[t0:t0 + H_eff]
     price_slice_forecast = price_forecast[t0:t0 + H_eff]
     h2_price_slice = np.full(H_eff, 5.5)
+    imbalance_slice = imbalance_price[t0:t0 + H_eff]
 
     # --- 3. Handle block data (FCR) carefully ---
     i0 = t0 // 16
@@ -208,7 +221,8 @@ while t0 < len(wind):
         T=H_eff,
         S=S,
         I=I_eff,
-        wind=wind_slice_forecast,
+        wind=wind_slice_real,
+        wind_forecast=wind_slice_forecast,
         price_DA=price_slice_forecast,
         price_H2=h2_price_slice,
         price_FCR=price_FCR_slice,
@@ -224,6 +238,7 @@ while t0 < len(wind):
         grid_cap=grid_cap,
         N_down=N_down,
         FCR_volume=FCR_volume_slice,
+        imbalance_price=imbalance_slice,
         z_on_prev=z_on_state,
         P_prev=P_prev
     )
@@ -252,19 +267,24 @@ while t0 < len(wind):
         storage_state = model.results.storage[step_eff - 1]
         print(f"  storage at end of window: {storage_state}")
 
+
     results_all.append({
-    "h": model.results.h[:step_eff],
-    "storage": model.results.storage[:step_eff],
-    "z_on": model.results.z_on[:step_eff],
-    "P_buy": model.results.P_buy[:step_eff],
-    "P_sell": model.results.P_sell[:step_eff],
-    "P_curt": model.results.P_curt[:step_eff],
-    "r_FCR_block": model.results.r_FCR_block[:step_eff],
-    "wind_real": wind_slice_real,
-    "price_real": price_slice_real,
-    "wind_forecast": wind_slice_forecast[:step_eff],
-    "price_forecast": price_slice_forecast[:step_eff],
-})
+        "h": model.results.h[:step_eff],
+        "storage": model.results.storage[:step_eff],
+        "z_on": model.results.z_on[:step_eff],
+        "P_buy": model.results.P_buy[:step_eff],
+        "P_sell": model.results.P_sell[:step_eff],
+        "P_curt": model.results.P_curt[:step_eff],
+        "r_FCR_block": model.results.r_FCR_block[:step_eff],
+        "wind_real": wind_slice_real,
+        "price_real": price_slice_real,
+        "wind_forecast": wind_slice_forecast[:step_eff],
+        "price_forecast": price_slice_forecast[:step_eff],
+    })
+    # else:
+    #     print(f"Warning: Model infeasible at window starting at t0={t0}, skipping this window.")
+    #     break
+    #     # Optionally, handle infeasible cases (e.g., set default values or break)
 
     # --- 6. Move forward ---
     t0 += step_eff

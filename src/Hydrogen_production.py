@@ -200,7 +200,7 @@ def electrolyzer_h2_prod_curve(T, I_range, A_cell, p, p_out, N_stacks, N_cell):
     P_total = P_stack + P_comp
 
 
-    return P_total, m_dot
+    return P_total, m_dot, P_stack
 
 def compressor_power(T, p, p_out, eta_c=0.85, gamma=1.4):
     R = 8.314 # J/(mol*K)

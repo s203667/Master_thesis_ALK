@@ -9,7 +9,7 @@ class Expando:
 
 class InputData:
     def __init__(self, T, S, I,
-                 wind, price_DA, price_H2, price_FCR,
+                 wind, wind_forecast, price_DA, price_H2, price_FCR, imbalance_price,
                  P_min, P_max, P_sb,
                  P_seg_min, P_seg_max,
                  A_s, B_s,
@@ -21,10 +21,11 @@ class InputData:
         self.I = I              # FCR blocks
 
         self.wind = wind
-        
+        self.wind_forecast = wind_forecast
         self.price_DA = price_DA
         self.price_H2 = price_H2
         self.price_FCR = price_FCR
+        self.imbalance_price = imbalance_price
 
         self.P_min = P_min
         self.P_max = P_max
@@ -79,6 +80,7 @@ class ElectrolyzerModel:
 
         m.P_buy = Var(m.T, domain=NonNegativeReals)
         m.P_sell = Var(m.T, domain=NonNegativeReals)
+
         m.deficit = Var(m.T, domain=NonNegativeReals)
 
         m.P_curt = Var(m.T, domain=NonNegativeReals)
@@ -93,6 +95,14 @@ class ElectrolyzerModel:
 
         m.r_FCR_block = Var(m.I, domain=NonNegativeReals)
         m.z_FCR = Var(m.I, domain=Binary)
+
+
+            # --- Parameters ---
+        m.wind_real = Param(m.T, initialize=lambda m,t: self.data.wind[t])
+        m.wind_forecast = Param(m.T, initialize=lambda m,t: self.data.wind_forecast[t])
+        m.price_DA = Param(m.T, initialize=lambda m,t: self.data.price_DA[t])
+        m.price_imb = Param(m.T, initialize=lambda m,t: self.data.imbalance_price[t])
+
         
 
         self.model = m
@@ -107,12 +117,6 @@ class ElectrolyzerModel:
     def _build_constraints(self):
         m = self.model
         d = self.data
-
-        #TESTING FUNCTION; DELETE THIS
-        # def force_on(m, t):
-        #     return m.z_on[t] == 1
-        # m.force_on = Constraint(m.T, rule=force_on)
-        ### Map time steps to FCR blocks ##
 
         def map_t_to_i(t):
             block_size = 16  # 4 hours / 15 min
@@ -163,12 +167,6 @@ class ElectrolyzerModel:
             return m.h[t] == sum(d.A_s[s] * m.P_seg[t, s] + d.B_s[s] * m.z_seg[t, s] for s in m.S)
         m.h2_prod = Constraint(m.T, rule=h2_rule)
 
-                # --- Standby power --- #Consider removing this
-        # def standby_rule(m, t):
-        #     # If z_sb[t] == 1, then sum P_seg == 0
-        #     # Use big-M: sum P_seg <= P_max * (1 - z_sb)
-        #     return sum(m.P_seg[t, s] for s in m.S) <= d.P_max * (1 - m.z_sb[t])
-        # m.standby = Constraint(m.T, rule=standby_rule) #Consider removing this
 
         #Standby power
         def standby_power_rule(m, t):
@@ -213,29 +211,30 @@ class ElectrolyzerModel:
 
         #--- add storage start and end constraints ---
 
-        # Power balance (P_compressor included in P_seg)
-        def power_balance_rule(m, t):
+        # --- WIND–ELECTROLYZER POWER BALANCE ---
+        def wind_balance_rule(m, t):
             return (
-                d.wind[t] + m.P_buy[t]
+                m.wind_real[t] + m.P_buy[t]
                 ==
                 sum(m.P_seg[t, s] for s in m.S)
                 + m.P_sb[t]
-                + m.P_sell[t]
                 + m.P_curt[t]
-            
+                + m.P_sell[t]
             )
-        m.power_balance = Constraint(m.T, rule=power_balance_rule)
+        m.wind_balance = Constraint(m.T, rule=wind_balance_rule)
 
 
-        def grid_sell_rule(m, t):
-            return m.P_sell[t] <= d.grid_cap
-        m.grid_sell = Constraint(m.T, rule=grid_sell_rule)
+        # --- GRID BUY LOGIC ---
+        # def grid_sell_rule(m, t):
+        #     return m.P_sell[t] <= d.grid_cap
+        # m.grid_sell = Constraint(m.T, rule=grid_sell_rule)
+
 
         def deficit_rule(m, t):
             return m.deficit[t] >= (
                 sum(m.P_seg[t, s] for s in m.S)
                 + m.P_sb[t]
-                - d.wind[t]
+                - m.wind_real[t]
             )
         m.deficit_con = Constraint(m.T, rule=deficit_rule)
 
@@ -246,6 +245,7 @@ class ElectrolyzerModel:
         def buy_limit_grid_rule(m, t):
             return m.P_buy[t] <= d.grid_cap
         m.buy_limit_grid = Constraint(m.T, rule=buy_limit_grid_rule)
+
 
         def fcr_min_rule(m, i):
             return m.r_FCR_block[i] >= d.P_min_bid * m.z_FCR[i]
@@ -307,7 +307,8 @@ class ElectrolyzerModel:
             return sum(
                 m.h_sell[t] * d.price_H2[t] * dt  # H2 production [kg/h] * price [EUR/kg] * time [h]
                 - m.P_buy[t] * d.price_DA[t] * dt / 1000  # Electricity buy [kW] * price [EUR/MWh] * time [h] / 1000
-                + m.P_sell[t] * d.price_DA[t] * dt / 1000  # Electricity sell [kW] * price [EUR/MWh] * time [h] / 1000
+                + (m.P_sell[t] - m.wind_forecast[t]) * m.price_imb[t] * dt / 1000  # Imbalance settlement for forecast error [kW] * imbalance price [EUR/MWh] * time [h] / 1000
+                +  (m.wind_forecast[t]) * m.price_DA[t] * dt / 1000 #Day-ahead offer  Electricity sell [kW] * price [EUR/MWh] * time [h] / 1000
                 for t in m.T
             ) + sum(m.r_FCR_block[i] * d.price_FCR[i] * dt_FCR  # FCR [kW] * price [EUR/kW] * block time [h]
                     for i in m.I)
