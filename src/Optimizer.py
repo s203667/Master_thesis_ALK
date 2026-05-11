@@ -14,13 +14,13 @@ class InputData:
                  P_seg_min, P_seg_max,
                  A_s, B_s,
                  storage_max, storage_initial, grid_cap,
-                 N_down, FCR_volume, z_on_prev=0, P_prev=0):
+                 N_down, FCR_volume, z_on_prev=0, P_prev=0, is_DA = False, DA_export = None):
 
         self.T = T              # time steps
         self.S = S              # segments
         self.I = I              # FCR blocks
 
-        self.wind = wind
+        self.wind = wind #Actual wind in real-time
         self.wind_forecast = wind_forecast
         self.price_DA = price_DA
         self.price_H2 = price_H2
@@ -48,6 +48,10 @@ class InputData:
 
         self.z_on_prev = z_on_prev
         self.P_prev = P_prev
+
+        self.is_DA = is_DA  # DA or real-time
+        self.DA_export = DA_export
+
 class ElectrolyzerModel:
 
     def __init__(self, data: InputData):
@@ -63,7 +67,9 @@ class ElectrolyzerModel:
         self.P_prev = P_prev
 
     def _build_model(self):
-        m = ConcreteModel()
+        m = ConcreteModel() #?
+        self.model = m
+        d = self.data
 
         # --- Sets ---
         m.T = RangeSet(0, self.data.T - 1)
@@ -79,7 +85,9 @@ class ElectrolyzerModel:
         m.z_off = Var(m.T, domain=Binary)
 
         m.P_buy = Var(m.T, domain=NonNegativeReals)
-        m.P_sell = Var(m.T, domain=NonNegativeReals)
+        m.P_DA = Var(m.T, domain=NonNegativeReals) #non-negative?
+        m.P_grid = Var(m.T, domain=NonNegativeReals)#non-negative?
+
 
         m.deficit = Var(m.T, domain=NonNegativeReals)
 
@@ -98,12 +106,23 @@ class ElectrolyzerModel:
 
 
             # --- Parameters ---
-        m.wind_real = Param(m.T, initialize=lambda m,t: self.data.wind[t])
-        m.wind_forecast = Param(m.T, initialize=lambda m,t: self.data.wind_forecast[t])
-        m.price_DA = Param(m.T, initialize=lambda m,t: self.data.price_DA[t])
-        m.price_imb = Param(m.T, initialize=lambda m,t: self.data.imbalance_price[t])
+                # wind: forecast in DA, actual in RT
+        if d.is_DA:
+            m.wind = Param(m.T, initialize=lambda m, t: d.wind_forecast[t])
+    
+        else:
+            m.wind = Param(m.T, initialize=lambda m, t: d.wind[t])
 
-        
+        m.price_DA = Param(m.T, initialize=lambda m, t: d.price_DA[t])
+        m.price_H2 = Param(m.T, initialize=lambda m, t: d.price_H2[t])
+        m.price_FCR = Param(m.I, initialize=lambda m, i: d.price_FCR[i])
+
+        if not d.is_DA:
+            m.price_imb = Param(m.T, initialize=lambda m, t: d.imbalance_price[t])
+            m.DA_export = Param(m.T, initialize=lambda m, t: d.DA_export[t])
+                # P_grid[t] = wind_real[t] - electrolyzer_load[t]
+
+
 
         self.model = m
 
@@ -212,21 +231,25 @@ class ElectrolyzerModel:
         #--- add storage start and end constraints ---
 
         # --- WIND–ELECTROLYZER POWER BALANCE ---
+        if d.is_DA:
+            export_var = m.P_DA
+        else:
+            export_var = m.P_grid
+
         def wind_balance_rule(m, t):
             return (
-                m.wind_real[t] + m.P_buy[t]
+                m.wind[t] + m.P_buy[t]
                 ==
                 sum(m.P_seg[t, s] for s in m.S)
                 + m.P_sb[t]
                 + m.P_curt[t]
-                + m.P_sell[t]
+                + export_var[t]
             )
         m.wind_balance = Constraint(m.T, rule=wind_balance_rule)
 
-
         # --- GRID BUY LOGIC ---
         # def grid_sell_rule(m, t):
-        #     return m.P_sell[t] <= d.grid_cap
+        #     return m.P_DA[t] <= d.grid_cap
         # m.grid_sell = Constraint(m.T, rule=grid_sell_rule)
 
 
@@ -234,7 +257,7 @@ class ElectrolyzerModel:
             return m.deficit[t] >= (
                 sum(m.P_seg[t, s] for s in m.S)
                 + m.P_sb[t]
-                - m.wind_real[t]
+                - m.wind[t]
             )
         m.deficit_con = Constraint(m.T, rule=deficit_rule)
 
@@ -257,8 +280,16 @@ class ElectrolyzerModel:
         m.fcr_max = Constraint(m.I, rule=fcr_max_rule)
 
 
+        # def fcr_on_block_rule(m, i):
+        #     return m.z_FCR[i] <= m.z_on[i*16]
+        # m.fcr_on_block = Constraint(m.I, rule=fcr_on_block_rule)
+
         def fcr_on_block_rule(m, i):
-            return m.z_FCR[i] <= m.z_on[i*16]
+            t = i * 16
+            if t >= d.T:
+                return Constraint.Skip
+            return m.z_FCR[i] <= m.z_on[t]
+
         m.fcr_on_block = Constraint(m.I, rule=fcr_on_block_rule)
 
         # ramping consraints
@@ -292,6 +323,21 @@ class ElectrolyzerModel:
             )
         m.ramp_down = Constraint(m.T, rule=ramp_down_rule)
 
+       
+        def P_DA_rule(m, t):
+            return m.P_DA[t] == m.wind[t] - (
+                sum(m.P_seg[t, s] for s in m.S) + m.P_sb[t]
+            )
+        
+        m.P_DA_con = Constraint(m.T, rule=P_DA_rule)
+
+        def P_grid_rule(m, t):
+            return m.P_grid[t] == m.wind[t] - (
+                sum(m.P_seg[t, s] for s in m.S) + m.P_sb[t]
+            )
+
+        m.P_grid_con = Constraint(m.T, rule=P_grid_rule)
+
 
         #Rolling horizon constraints:
         def initial_on_rule(m):
@@ -301,17 +347,33 @@ class ElectrolyzerModel:
     def _build_objective(self):
         m = self.model
         d = self.data
-        dt = 0.25 #Because hydrogen production is in kg/h
-        dt_FCR = 16  # FCR blocks are 4 hours, so 16 * 15min intervals
-        def obj_rule(m):
-            return sum(
-                m.h_sell[t] * d.price_H2[t] * dt  # H2 production [kg/h] * price [EUR/kg] * time [h]
-                - m.P_buy[t] * d.price_DA[t] * dt / 1000  # Electricity buy [kW] * price [EUR/MWh] * time [h] / 1000
-                + (m.P_sell[t] - m.wind_forecast[t]) * m.price_imb[t] * dt / 1000  # Imbalance settlement for forecast error [kW] * imbalance price [EUR/MWh] * time [h] / 1000
-                +  (m.wind_forecast[t]) * m.price_DA[t] * dt / 1000 #Day-ahead offer  Electricity sell [kW] * price [EUR/MWh] * time [h] / 1000
-                for t in m.T
-            ) + sum(m.r_FCR_block[i] * d.price_FCR[i] * dt_FCR  # FCR [kW] * price [EUR/kW] * block time [h]
-                    for i in m.I)
+        dt = 0.25
+        dt_FCR = 16
+
+        if d.is_DA:
+            # DAY-AHEAD: forecast-based, no imbalance
+            def obj_rule(m):
+                return sum(
+                    m.h_sell[t] * d.price_H2[t] * dt
+                    - m.P_buy[t] * d.price_DA[t] * dt / 1000
+                    + m.P_DA[t] * d.price_DA[t] * dt / 1000
+                    for t in m.T
+                ) + sum(
+                    m.r_FCR_block[i] * d.price_FCR[i] * dt_FCR
+                    for i in m.I
+                )
+        else:
+            # REAL-TIME: actual-based, P_grid fixed, imbalance included
+            def obj_rule(m):
+                return sum(
+                    m.h_sell[t] * d.price_H2[t] * dt
+                    - m.P_buy[t] * d.price_DA[t] * dt / 1000
+                    # DA revenue on fixed P_grid
+                   # + m.P_grid[t] * d.price_DA[t] * dt / 1000
+                    # imbalance on deviation between actual export (P_DA) and P_grid
+                    - (m.DA_export[t] - m.P_grid[t]) * m.price_imb[t] * dt / 1000
+                        for t in m.T)
+
         m.obj = Objective(rule=obj_rule, sense=maximize)
 
 
@@ -346,7 +408,12 @@ class ElectrolyzerModel:
         self.results.z_sb = [value(m.z_sb[t]) for t in m.T]  # Standby status
         self.results.z_off = [value(m.z_off[t]) for t in m.T]  # Off status
         self.results.P_buy = [value(m.P_buy[t]) for t in m.T]  # Electricity bought
-        self.results.P_sell = [value(m.P_sell[t]) for t in m.T]  # Electricity sold
+        self.results.P_DA = [value(m.P_DA[t]) for t in m.T]  # Electricity sold
         self.results.P_curt = [value(m.P_curt[t]) for t in m.T]  # Curtailed power
         self.results.r_FCR_block = [value(m.r_FCR_block[i]) for i in m.I]  # FCR block power
         self.results.h_sell = [value(m.h_sell[t]) for t in m.T]  # Hydrogen sold
+        self.results.P_grid = [value(m.P_grid[t]) for t in m.T]  # Grid export
+        self.results.P_elec = np.array([
+        sum(m.P_seg[t, s].value for s in m.S) + m.P_sb[t].value
+        for t in m.T
+    ])
