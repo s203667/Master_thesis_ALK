@@ -70,6 +70,22 @@ class ElectrolyzerModel:
         m = ConcreteModel() #?
         self.model = m
         d = self.data
+        print("\n=== DEBUG: BUILDING MODEL ===")
+        print("is_DA:", d.is_DA)
+
+        if getattr(d, "wind", None) is not None:
+            print("wind first 10:", d.wind[:10])
+        else:
+            print("NO d.wind (None)")
+
+        if getattr(d, "wind_forecast", None) is not None:
+            print("wind_forecast first 10:", d.wind_forecast[:10])
+        else:
+            print("NO d.wind_forecast (None)")
+
+        print("price_DA first 10:", d.price_DA[:10])
+        print("T:", d.T)
+        print("I:", d.I)
 
         # --- Sets ---
         m.T = RangeSet(0, self.data.T - 1)
@@ -294,7 +310,7 @@ class ElectrolyzerModel:
 
         # ramping consraints
         def ramp_up_rule(m, t):
-            dR_up = 4000 # kW/15Min #PLACEHOLDER
+            dR_up = 400000 # kW/15Min #PLACEHOLDER
             if t == 0:
                 return (
                     sum(m.P_seg[0, s] for s in m.S)
@@ -309,7 +325,7 @@ class ElectrolyzerModel:
         m.ramp_up = Constraint(m.T, rule=ramp_up_rule)
 
         def ramp_down_rule(m, t):
-            dR_down = 4000 # kW/15min #PLACEHOLDER
+            dR_down = 400000 # kW/15min #PLACEHOLDER
             if t == 0:
                 return (
                     d.P_prev
@@ -369,51 +385,67 @@ class ElectrolyzerModel:
                     m.h_sell[t] * d.price_H2[t] * dt
                     - m.P_buy[t] * d.price_DA[t] * dt / 1000
                     # DA revenue on fixed P_grid
-                   # + m.P_grid[t] * d.price_DA[t] * dt / 1000
-                    # imbalance on deviation between actual export (P_DA) and P_grid
+                   + m.DA_export[t] * d.price_DA[t] * dt / 1000
+                    # imbalance on deviation between actual export s(P_DA) and P_grid
                     - (m.DA_export[t] - m.P_grid[t]) * m.price_imb[t] * dt / 1000
-                        for t in m.T)
+                        for t in m.T
+                ) + sum(
+                    m.r_FCR_block[i] * d.price_FCR[i] * dt_FCR
+                    for i in m.I
+                )
 
         m.obj = Objective(rule=obj_rule, sense=maximize)
 
 
     def run(self):
         solver = SolverFactory('gurobi')
-        solver.options['DualReductions'] = 0  # helps distinguish infeasible vs unbounded
+        solver.options['DualReductions'] = 0
         results = solver.solve(self.model, tee=True)
 
         tc = results.solver.termination_condition
         print("Termination condition:", tc)
 
-        self.results.has_solution = (tc == TerminationCondition.optimal)
+        if tc == TerminationCondition.optimal:
+            self._save_results()
+            return
 
-        if not self.results.has_solution:
-            print("Computing IIS...")
+        print("Model is NOT optimal:", tc)
+
+        # Try IIS
+        try:
             solver = SolverFactory('gurobi')
             solver.options['IISMethod'] = 1
             solver.solve(self.model, tee=True, symbolic_solver_labels=True)
-            return
-        
-        if not self.results.has_solution:
-            print("Model is infeasible; debugging constraint values...")
-            self.debug_constraints()
-            return
-        self._save_results()
+            
+        except:
+            pass
+
+        # Debug constraints
+        #self.debug_constraints()
 
     def _save_results(self):
         m = self.model
+
+        self.results.P_DA = np.array([value(m.P_DA[t]) for t in m.T]) if hasattr(m, "P_DA") else None
+        self.results.P_grid = np.array([value(m.P_grid[t]) for t in m.T]) if hasattr(m, "P_grid") else None
         self.results.h = [value(m.h[t]) for t in m.T]
         self.results.storage = [value(m.storage[t]) for t in m.T]
         self.results.z_on = [value(m.z_on[t]) for t in m.T]  # On/off status
         self.results.z_sb = [value(m.z_sb[t]) for t in m.T]  # Standby status
         self.results.z_off = [value(m.z_off[t]) for t in m.T]  # Off status
         self.results.P_buy = [value(m.P_buy[t]) for t in m.T]  # Electricity bought
-        self.results.P_DA = [value(m.P_DA[t]) for t in m.T]  # Electricity sold
         self.results.P_curt = [value(m.P_curt[t]) for t in m.T]  # Curtailed power
         self.results.r_FCR_block = [value(m.r_FCR_block[i]) for i in m.I]  # FCR block power
         self.results.h_sell = [value(m.h_sell[t]) for t in m.T]  # Hydrogen sold
-        self.results.P_grid = [value(m.P_grid[t]) for t in m.T]  # Grid export
         self.results.P_elec = np.array([
         sum(m.P_seg[t, s].value for s in m.S) + m.P_sb[t].value
         for t in m.T
     ])
+        self.results.objective_value = value(m.obj)
+        # print("Saved results: P_DA length =", len(self.results.P_DA) if self.results.P_DA is not None else None)
+        # print("\n=== IIS CONSTRAINTS ===")
+        # for c in m.component_objects(Constraint, active=True):
+        #     for idx in c:
+        #         if c[idx].active and c[idx].has_ub() and c[idx].has_lb():
+        #             if c[idx].lbody() > c[idx].ub() + 1e-6 or c[idx].ub() < c[idx].lbody() - 1e-6:
+        #                 print("VIOLATED:", c.name, idx, value(c[idx].body))
