@@ -9,7 +9,7 @@ class Expando:
 
 class InputData:
     def __init__(self, T, S, I,
-                 wind, wind_forecast, price_DA, price_H2, price_FCR, imbalance_price,
+                 wind, wind_forecast, price_DA, price_H2, price_FCR, r_FCR_DA, imbalance_price,
                  P_min, P_max, P_sb,
                  P_seg_min, P_seg_max,
                  A_s, B_s,
@@ -25,6 +25,7 @@ class InputData:
         self.price_DA = price_DA
         self.price_H2 = price_H2
         self.price_FCR = price_FCR
+        self.r_FCR_DA = r_FCR_DA
         self.imbalance_price = imbalance_price
 
         self.P_min = P_min
@@ -101,9 +102,11 @@ class ElectrolyzerModel:
         m.z_off = Var(m.T, domain=Binary)
 
         m.P_buy = Var(m.T, domain=NonNegativeReals)
-        m.P_DA = Var(m.T, domain=NonNegativeReals) #non-negative?
-        m.P_grid = Var(m.T, domain=NonNegativeReals)#non-negative?
-
+        if d.is_DA:
+            m.P_DA = Var(m.T, bounds=(-d.grid_cap, None))
+        else:
+            m.P_grid = Var(m.T, bounds=(-d.grid_cap, None))
+        m.dev = Var(m.T, domain=NonNegativeReals)
 
         m.deficit = Var(m.T, domain=NonNegativeReals)
 
@@ -116,10 +119,12 @@ class ElectrolyzerModel:
 
         m.storage = Var(m.T, domain=NonNegativeReals)
 
-
-        m.r_FCR_block = Var(m.I, domain=NonNegativeReals)
-        m.z_FCR = Var(m.I, domain=Binary)
-
+        if d.is_DA:
+            m.r_FCR_block = Var(m.I, domain=NonNegativeReals)
+            m.z_FCR = Var(m.I, domain=Binary)
+        else:
+            m.r_FCR_block = Param(m.I, initialize=lambda m, i: d.r_FCR_DA[i])
+            m.z_FCR = Param(m.I, initialize=lambda m, i: 1 if d.r_FCR_DA[i] > 0 else 0)
 
             # --- Parameters ---
                 # wind: forecast in DA, actual in RT
@@ -136,8 +141,17 @@ class ElectrolyzerModel:
         if not d.is_DA:
             m.price_imb = Param(m.T, initialize=lambda m, t: d.imbalance_price[t])
             m.DA_export = Param(m.T, initialize=lambda m, t: d.DA_export[t])
-                # P_grid[t] = wind_real[t] - electrolyzer_load[t]
 
+            # for i in m.I:
+            #     m.r_FCR_block[i].fix(d.r_FCR_DA[i])
+            #     m.z_FCR[i].fix(1 if d.r_FCR_DA[i] > 0 else 0)
+ 
+
+            # for t in m.T:
+            #     if abs(d.wind[t] - d.wind_forecast[t]) < 1e-6:
+            #         # perfect forecast → electrolyzer must follow DA
+            #         m.P_elec[t].fix(d.P_elec_DA[t])
+   
 
 
         self.model = m
@@ -155,7 +169,7 @@ class ElectrolyzerModel:
 
         def map_t_to_i(t):
             block_size = 16  # 4 hours / 15 min
-            return t // block_size
+            return t // block_size 
 
          #Piecewise bounds
         def seg_min_rule(m, t, s):
@@ -188,11 +202,13 @@ class ElectrolyzerModel:
 
         # Minimum load constraint
         def min_load_rule(m, t):
+            #if t == 0:
+             #   return Constraint.Skip
             return (
                 sum(m.P_seg[t, s] for s in m.S)
-                + m.P_sb[t]
+               # + m.P_sb[t]
                 -  m.r_FCR_block[map_t_to_i(t)]
-                >= d.P_min * (m.z_on[t] + m.z_sb[t])
+                >= d.P_min * (m.z_on[t] )#+ m.z_sb[t])
             )
         m.min_load = Constraint(m.T, rule=min_load_rule)
 
@@ -249,6 +265,7 @@ class ElectrolyzerModel:
         # --- WIND–ELECTROLYZER POWER BALANCE ---
         if d.is_DA:
             export_var = m.P_DA
+            m.P_buy.fix(0)  # No buying in DA, only selling
         else:
             export_var = m.P_grid
 
@@ -279,34 +296,36 @@ class ElectrolyzerModel:
 
         def buy_limit_deficit_rule(m, t):
             return m.P_buy[t] <= m.deficit[t]
-        m.buy_limit_deficit = Constraint(m.T, rule=buy_limit_deficit_rule)
+        #m.buy_limit_deficit = Constraint(m.T, rule=buy_limit_deficit_rule)
 
         def buy_limit_grid_rule(m, t):
             return m.P_buy[t] <= d.grid_cap
         m.buy_limit_grid = Constraint(m.T, rule=buy_limit_grid_rule)
 
+        if d.is_DA:
+            def fcr_min_rule(m, i):
+                return m.r_FCR_block[i] >= d.P_min_bid * m.z_FCR[i]
+            m.fcr_min = Constraint(m.I, rule=fcr_min_rule)
 
-        def fcr_min_rule(m, i):
-            return m.r_FCR_block[i] >= d.P_min_bid * m.z_FCR[i]
-        m.fcr_min = Constraint(m.I, rule=fcr_min_rule)
-
-        def fcr_max_rule(m, i):
-            upper_bound = min(d.P_max, d.P_max_bid[i])
-            return m.r_FCR_block[i] <= upper_bound * m.z_FCR[i]
-        m.fcr_max = Constraint(m.I, rule=fcr_max_rule)
+            def fcr_max_rule(m, i):
+                upper_bound = min(d.P_max, d.P_max_bid[i])
+                return m.r_FCR_block[i] <= upper_bound * m.z_FCR[i]
+            m.fcr_max = Constraint(m.I, rule=fcr_max_rule)
 
 
-        # def fcr_on_block_rule(m, i):
-        #     return m.z_FCR[i] <= m.z_on[i*16]
-        # m.fcr_on_block = Constraint(m.I, rule=fcr_on_block_rule)
+            # def fcr_on_block_rule(m, i):
+            #     return m.z_FCR[i] <= m.z_on[i*16]
+            # m.fcr_on_block = Constraint(m.I, rule=fcr_on_block_rule)
 
-        def fcr_on_block_rule(m, i):
-            t = i * 16
-            if t >= d.T:
-                return Constraint.Skip
-            return m.z_FCR[i] <= m.z_on[t]
+            def fcr_on_block_rule(m, i):
+                t = i * 16
+                if t >= d.T:
+                    return Constraint.Skip
+                return m.z_FCR[i] <= m.z_on[t]
 
-        m.fcr_on_block = Constraint(m.I, rule=fcr_on_block_rule)
+            m.fcr_on_block = Constraint(m.I, rule=fcr_on_block_rule)
+        else:
+            pass # In RT, FCR is fixed from DA, so no need for these constraints
 
         # ramping consraints
         def ramp_up_rule(m, t):
@@ -339,25 +358,25 @@ class ElectrolyzerModel:
             )
         m.ramp_down = Constraint(m.T, rule=ramp_down_rule)
 
-       
-        def P_DA_rule(m, t):
-            return m.P_DA[t] == m.wind[t] - (
-                sum(m.P_seg[t, s] for s in m.S) + m.P_sb[t]
-            )
-        
-        m.P_DA_con = Constraint(m.T, rule=P_DA_rule)
 
-        def P_grid_rule(m, t):
-            return m.P_grid[t] == m.wind[t] - (
-                sum(m.P_seg[t, s] for s in m.S) + m.P_sb[t]
-            )
+        # def P_grid_min_rule(m, t):
+        #     return m.P_grid[t] >= -m.P_buy[t]
 
-        m.P_grid_con = Constraint(m.T, rule=P_grid_rule)
+        # m.P_grid_min_con = Constraint(m.T, rule=P_grid_min_rule)
+
+        # if not d.is_DA:
+        #     def dev_pos(m, t):
+        #         return m.dev[t] >= m.P_grid[t] - m.DA_export[t]
+        #     m.dev_pos = Constraint(m.T, rule=dev_pos)
+
+        #     def dev_neg(m, t):
+        #         return m.dev[t] >= -(m.P_grid[t] - m.DA_export[t])
+        #     m.dev_neg = Constraint(m.T, rule=dev_neg)
 
 
         #Rolling horizon constraints:
         def initial_on_rule(m):
-            return m.z_on[0] == d.z_on_prev
+            return m.z_on[0] <= d.z_on_prev
         m.initial_on = Constraint(rule=initial_on_rule)
 
     def _build_objective(self):
@@ -371,7 +390,6 @@ class ElectrolyzerModel:
             def obj_rule(m):
                 return sum(
                     m.h_sell[t] * d.price_H2[t] * dt
-                    - m.P_buy[t] * d.price_DA[t] * dt / 1000
                     + m.P_DA[t] * d.price_DA[t] * dt / 1000
                     for t in m.T
                 ) + sum(
@@ -385,9 +403,8 @@ class ElectrolyzerModel:
                     m.h_sell[t] * d.price_H2[t] * dt
                     - m.P_buy[t] * d.price_DA[t] * dt / 1000
                     # DA revenue on fixed P_grid
-                   + m.DA_export[t] * d.price_DA[t] * dt / 1000
                     # imbalance on deviation between actual export s(P_DA) and P_grid
-                    - (m.DA_export[t] - m.P_grid[t]) * m.price_imb[t] * dt / 1000
+                    -(m.P_grid[t] - m.DA_export[t]) * m.price_imb[t] * dt / 1000
                         for t in m.T
                 ) + sum(
                     m.r_FCR_block[i] * d.price_FCR[i] * dt_FCR
@@ -416,7 +433,15 @@ class ElectrolyzerModel:
             solver = SolverFactory('gurobi')
             solver.options['IISMethod'] = 1
             solver.solve(self.model, tee=True, symbolic_solver_labels=True)
-            
+            from pyomo.util.infeasible import log_infeasible_constraints
+
+            import logging
+            from pyomo.util.infeasible import log_infeasible_constraints
+
+            logging.getLogger('pyomo.core').setLevel(logging.INFO)
+            print("\n=== Infeasibility report (RT Day 2) ===")
+            log_infeasible_constraints(self.model, log_expression=True, tol=1e-6)
+
         except:
             pass
 
@@ -425,9 +450,15 @@ class ElectrolyzerModel:
 
     def _save_results(self):
         m = self.model
-
-        self.results.P_DA = np.array([value(m.P_DA[t]) for t in m.T]) if hasattr(m, "P_DA") else None
-        self.results.P_grid = np.array([value(m.P_grid[t]) for t in m.T]) if hasattr(m, "P_grid") else None
+        d = self.data
+        if d.is_DA:
+            self.results.P_DA = np.array([value(m.P_DA[t]) for t in m.T])
+        else:
+            self.results.P_DA = np.array([value(m.DA_export[t]) for t in m.T])        
+        if not d.is_DA:
+            self.results.P_grid = np.array([value(m.P_grid[t]) for t in m.T])
+        else:
+            self.results.P_grid = None
         self.results.h = [value(m.h[t]) for t in m.T]
         self.results.storage = [value(m.storage[t]) for t in m.T]
         self.results.z_on = [value(m.z_on[t]) for t in m.T]  # On/off status
@@ -438,10 +469,16 @@ class ElectrolyzerModel:
         self.results.r_FCR_block = [value(m.r_FCR_block[i]) for i in m.I]  # FCR block power
         self.results.h_sell = [value(m.h_sell[t]) for t in m.T]  # Hydrogen sold
         self.results.P_elec = np.array([
-        sum(m.P_seg[t, s].value for s in m.S) + m.P_sb[t].value
-        for t in m.T
-    ])
+         sum(m.P_seg[t, s].value for s in m.S) + m.P_sb[t].value
+         for t in m.T
+     ])
+        # self.results.P_elec = {
+        #     t: sum(self.model.P_seg[t, s].value for s in self.model.S)
+        #     + self.model.P_sb[t].value
+        #     for t in self.model.T
+        # }
         self.results.objective_value = value(m.obj)
+        self.results.r_FCR_block = {i: value(m.r_FCR_block[i]) for i in m.I}
         # print("Saved results: P_DA length =", len(self.results.P_DA) if self.results.P_DA is not None else None)
         # print("\n=== IIS CONSTRAINTS ===")
         # for c in m.component_objects(Constraint, active=True):

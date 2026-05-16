@@ -45,7 +45,7 @@ A_s, B_s, P_seg_min, P_seg_max, P_total, m_dot, P_stack = generate_piecewise(
     A_cell=0.0625,
     p=40,
     p_out=45,
-    N_stacks=40*20,
+    N_stacks=40*10,
     N_cell=250,
     n_segments=3,
     plot=True  # Set to True to see plot
@@ -71,7 +71,7 @@ price_H2 = np.full(len(wind_real), 5.5)
 #price_H2 = np.full(H, 5.5)  # Hydrogen price [EUR/kg], constant for now, from European Hydrogen Observatory
 price_FCR = fcr_df['price_FCR'].values  # FCR price [EUR/kW]
 FCR_volume = fcr_df['FCR_volume'].values # FCR volume [kW], using "up" as example
-grid_cap = 4100.0  # Max grid power [kW], adjust as needed
+grid_cap = 40000.0  # Max grid power [kW], adjust as needed
 
 
 # Electrolyzer parameters
@@ -81,7 +81,7 @@ P_total, m_dot, P_stack = hp.electrolyzer_h2_prod_curve(
     A_cell=0.0625,
     p=40,
     p_out=45,
-    N_stacks=40*20,
+    N_stacks=40*10,
     N_cell=250
 )
 P_min = min(P_stack)      # Minimum power [kW] #CHANGE###
@@ -107,18 +107,18 @@ price_forecast[:lag] = price_real[:lag]
 
 #r_FCR_block = 0  ####TEMPORARILY WHILE TESTING #####
 # Storage parameters
-storage_max = 2000.0     # Max storage [kg]
+storage_max = 10000.0     # Max storage [kg]
 storage_initial = 0.0     # Initial storage [kg]
 N_down = 3             # Downtime in 15min intervals, adjust as needed
 
 t0 = 0
 
 storage_state = storage_initial
-z_on_state = 1
+z_on_state = 0
 P_prev = 0
 
 TIMESTEPS_PER_DAY = 96
-num_days =  20 #len(wind_real) // TIMESTEPS_PER_DAY
+num_days =  20#len(wind_real) // TIMESTEPS_PER_DAY
 
 blocks_per_day = TIMESTEPS_PER_DAY // 16
 
@@ -162,6 +162,7 @@ for day in range(num_days):
         price_DA=price_fc_day,
         price_H2=price_H2_day,
         price_FCR=price_FCR_day,
+        r_FCR_DA = None,
         imbalance_price=None,
         P_min=P_min,
         P_max=P_max,
@@ -190,15 +191,24 @@ for day in range(num_days):
     print(f"\n--- Window starting at t0={t0} ---")
     print(f"  storage_initial passed to model: {storage_state}")
 
+
     P_DA = np.array(DA_model.results.P_DA) # DA export schedule
     P_Elec_DA = np.array([
         sum(DA_model.model.P_seg[t, s].value for s in DA_model.model.S)
         + DA_model.model.P_sb[t].value
         for t in DA_model.model.T
     ])
+
     h_sell_DA = np.array(DA_model.results.h_sell)
     P_buy_DA = np.array(DA_model.results.P_buy)
     DA_objectives.append(DA_model.results.objective_value)
+    r_FCR_DA = DA_model.results.r_FCR_block
+    print("\n=== DAY 2 DA SUMMARY ===")
+    print("P_DA first 10:", P_DA[:10])
+    print("P_elec_DA first 10:", P_Elec_DA[:10])
+    print("h_sell_DA first 10:", h_sell_DA[:10])
+    print("storage_end_DA:", DA_model.results.storage[-1])
+    print("z_on_end_DA:", DA_model.results.z_on[-1])
 
     # -----------------------------
     # 3. Slice REAL DATA for RT run
@@ -212,12 +222,13 @@ for day in range(num_days):
     input_RT = InputData(
         T=TIMESTEPS_PER_DAY,
         S=S,
-        I=len(price_FCR),
+        I=len(price_FCR_day),
         wind=wind_rt_day,             # actual wind
-        wind_forecast=None,
+        wind_forecast=wind_fc_day,         # same forecast as DA
         price_DA=price_rt_day,        # actual DA price
         price_H2=price_H2_RT,
-        price_FCR=price_FCR,
+        price_FCR=price_FCR_day,
+        r_FCR_DA=r_FCR_DA,          # use DA FCR schedule
         imbalance_price=imbalance_day,
         P_min=P_min,
         P_max=P_max,
@@ -230,7 +241,7 @@ for day in range(num_days):
         storage_initial=storage_state,
         grid_cap=grid_cap,
         N_down=N_down,
-        FCR_volume=FCR_volume,
+        FCR_volume=FCR_volume_day,
         z_on_prev=z_on_state,
         P_prev=P_prev,
         is_DA=False,
@@ -239,10 +250,18 @@ for day in range(num_days):
 
 
     RT_model = ElectrolyzerModel(input_RT)
+    print("\n=== DAY 2 RT INPUT STATE ===")
+    print("storage_initial:", storage_state)
+    print("z_on_prev:", z_on_state)
+    print("P_prev:", P_prev)
+    print("r_FCR_DA:", r_FCR_DA)
+    print("wind_rt_day first 10:", wind_rt_day[:10])
+    print("DA_export first 10:", P_DA[:10])
+    print("imbalance first 10:", imbalance_day[:10])
     RT_model.run()
 
-    P_grid    = np.array(RT_model.results.P_grid)
     h_sell_RT = np.array(RT_model.results.h_sell)
+    P_grid    = np.array(RT_model.results.P_grid)
     P_buy_RT  = np.array(RT_model.results.P_buy)
 
     RT_objectives.append(RT_model.results.objective_value)
@@ -256,8 +275,16 @@ for day in range(num_days):
     print("  FCR blocks this day:", price_FCR_day)
     print("  len(price_FCR_day):", len(price_FCR_day))
     print("  I passed to model:", len(price_FCR_day))
-
-    #Save results
+    print("_-----------------------------")
+    print(f"\nDAY {day+1} — DA FCR results")
+    print("  r_FCR_DA:", r_FCR_DA)
+    print("  price_FCR_day:", price_FCR_day)
+    print("  FCR_volume_day:", FCR_volume_day)
+    print("  r_FCR_DA:", r_FCR_DA)
+    print("  P_min:", P_min, "P_max:", P_max)
+    print("  first few wind_rt_day:", wind_rt_day[:10])
+    print("  storage_state at start:", storage_state)
+        #Save results
     results_all.append({
         "P_DA": P_DA,
         "P_grid": P_grid,
@@ -265,7 +292,7 @@ for day in range(num_days):
         "h_sell_RT": h_sell_RT,
         "P_buy_DA": P_buy_DA,
         "P_buy_RT": P_buy_RT,
-        "imbalance": np.array(P_DA) - np.array(P_grid),
+        "imbalance": np.array(P_grid) - np.array(P_DA),
         "storage_end": storage_state,
         "Total profit": DA_model.results.objective_value + RT_model.results.objective_value - sum(h_sell_DA * price_H2_day)
     })
@@ -289,14 +316,119 @@ for day in range(num_days):
 #     # Optionally, handle infeasible cases (e.g., set default values or break)
 
 
-P_DA_full = np.concatenate([d["P_DA"] for d in results_all])
-P_grid_full = np.concatenate([d["P_grid"] for d in results_all])
-imbalance_full = np.concatenate([d["imbalance"] for d in results_all])
+# =========================
+# CONCATENATE FULL RESULTS
+# =========================
 
+P_DA_full       = np.concatenate([d["P_DA"] for d in results_all])
+P_grid_full     = np.concatenate([d["P_grid"] for d in results_all])
+imbalance_full  = np.concatenate([d["imbalance"] for d in results_all])
+
+h_sell_DA_full  = np.concatenate([d["h_sell_DA"] for d in results_all])
+h_sell_RT_full  = np.concatenate([d["h_sell_RT"] for d in results_all])
+
+P_buy_DA_full   = np.concatenate([d["P_buy_DA"] for d in results_all])
+P_buy_RT_full   = np.concatenate([d["P_buy_RT"] for d in results_all])
+
+# Actual and forecast wind for same simulation period
+wind_real_full = wind_real[:len(P_DA_full)]
+wind_fc_full   = wind_forecast[:len(P_DA_full)]
+
+# Forecast error
+wind_error_full = wind_real_full - wind_fc_full
 total_profit_DA = sum(DA_objectives)
 total_profit_RT = sum(RT_objectives)
-total_profit = total_profit_DA + total_profit_RT - sum(d["h_sell_DA"] * price_H2[:len(d["h_sell_DA"])].mean() for d in results_all)
+#total_profit = total_profit_DA + total_profit_RT - sum(d["h_sell_DA"] * price_H2[:len(d["h_sell_DA"])].mean() for d in results_all)
 
+
+plt.figure(figsize=(15,5))
+
+plt.plot(P_DA_full, label="DA Export")
+plt.plot(P_grid_full, label="RT Export")
+
+plt.title("DA vs RT Export")
+plt.xlabel("Timestep")
+plt.ylabel("Power [kW]")
+plt.legend()
+plt.grid()
+
+plt.show()
+
+plt.figure(figsize=(15,5))
+
+plt.plot(imbalance_full, label="Power imbalance")
+plt.plot(wind_error_full, label="Wind forecast error")
+
+plt.title("Imbalance vs Wind Forecast Error")
+plt.xlabel("Timestep")
+plt.ylabel("kW")
+plt.legend()
+plt.grid()
+
+plt.show()
+
+plt.figure(figsize=(15,5))
+
+plt.plot(P_buy_RT_full)
+
+plt.title("Real-Time Grid Purchases")
+plt.xlabel("Timestep")
+plt.ylabel("Power Bought [kW]")
+plt.grid()
+
+plt.show()
+
+plt.figure(figsize=(15,5))
+
+plt.plot(h_sell_DA_full, label="DA H2 sale")
+plt.plot(h_sell_RT_full, label="RT H2 sale")
+
+plt.title("Hydrogen Sales")
+plt.xlabel("Timestep")
+plt.ylabel("kg")
+plt.legend()
+plt.grid()
+
+plt.show()
+
+plt.figure(figsize=(6,6))
+
+plt.scatter(wind_error_full, imbalance_full, alpha=0.3)
+
+plt.xlabel("Wind Forecast Error [kW]")
+plt.ylabel("Imbalance [kW]")
+
+plt.title("Forecast Error vs Imbalance")
+plt.grid()
+
+plt.show()
+
+plt.figure(figsize=(10,5))
+
+plt.hist(imbalance_full, bins=100)
+
+plt.title("Imbalance Distribution")
+plt.xlabel("Imbalance [kW]")
+plt.ylabel("Count")
+
+plt.grid()
+
+plt.show()
+
+plt.figure(figsize=(15,5))
+
+plt.plot(wind_real_full, label="Actual Wind")
+plt.plot(wind_fc_full, label="Forecast Wind")
+
+plt.title("Wind Forecast vs Actual")
+plt.legend()
+plt.grid()
+
+plt.show()
+
+
+print("Total DA profit:", total_profit_DA)
+print("Total RT profit:", total_profit_RT)
 # full series
 wind_real_full     = wind_real[:len(P_DA_full)]
 wind_forecast_full = wind_forecast[:len(P_DA_full)]
