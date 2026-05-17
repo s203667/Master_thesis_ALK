@@ -119,6 +119,8 @@ class ElectrolyzerModel:
 
         m.storage = Var(m.T, domain=NonNegativeReals)
 
+        m.dev_elec = Var(m.T, domain=NonNegativeReals) #Consider removing this
+
         if d.is_DA:
             m.r_FCR_block = Var(m.I, domain=NonNegativeReals)
             m.z_FCR = Var(m.I, domain=Binary)
@@ -241,9 +243,10 @@ class ElectrolyzerModel:
         m.downtime = Constraint(m.T, rule=downtime_rule)
 
         # Storage dynamics 
+        T_last = d.T - 1
         def storage_rule(m, t):
             if t == 0:
-                return m.storage[t] == d.storage_initial
+                return m.storage[t] == m.storage[T_last]+ m.h[t] - m.h_sell[t] #Consider this
             return m.storage[t] == m.storage[t-1] + m.h[t] - m.h_sell[t]
         m.storage_dyn = Constraint(m.T, rule=storage_rule)
 
@@ -254,7 +257,7 @@ class ElectrolyzerModel:
 
         def h_sell_prod_limit(m, t):
             if t == 0:
-                return m.h_sell[t] <= m.h[t] + d.storage_initial
+                return m.h_sell[t] <= m.h[t] + m.storage[T_last]
             return m.h_sell[t] <= m.h[t] + m.storage[t-1]  # Can only sell what is produced plus what's in storage
         m.h_sell_prod_limit = Constraint(m.T, rule=h_sell_prod_limit)
 
@@ -296,11 +299,15 @@ class ElectrolyzerModel:
 
         def buy_limit_deficit_rule(m, t):
             return m.P_buy[t] <= m.deficit[t]
-        #m.buy_limit_deficit = Constraint(m.T, rule=buy_limit_deficit_rule)
+        m.buy_limit_deficit = Constraint(m.T, rule=buy_limit_deficit_rule)
 
         def buy_limit_grid_rule(m, t):
             return m.P_buy[t] <= d.grid_cap
         m.buy_limit_grid = Constraint(m.T, rule=buy_limit_grid_rule)
+
+        def buy_use_limit(m, t):
+            return m.P_buy[t] <= sum(m.P_seg[t, s] for s in m.S) + m.P_sb[t]
+        m.buy_use_limit = Constraint(m.T, rule=buy_use_limit)
 
         if d.is_DA:
             def fcr_min_rule(m, i):
@@ -329,7 +336,7 @@ class ElectrolyzerModel:
 
         # ramping consraints
         def ramp_up_rule(m, t):
-            dR_up = 400000 # kW/15Min #PLACEHOLDER
+            dR_up = 100000 # kW/15Min #PLACEHOLDER
             if t == 0:
                 return (
                     sum(m.P_seg[0, s] for s in m.S)
@@ -344,7 +351,7 @@ class ElectrolyzerModel:
         m.ramp_up = Constraint(m.T, rule=ramp_up_rule)
 
         def ramp_down_rule(m, t):
-            dR_down = 400000 # kW/15min #PLACEHOLDER
+            dR_down = 100000 # kW/15min #PLACEHOLDER
             if t == 0:
                 return (
                     d.P_prev
@@ -404,7 +411,7 @@ class ElectrolyzerModel:
                     - m.P_buy[t] * d.price_DA[t] * dt / 1000
                     # DA revenue on fixed P_grid
                     # imbalance on deviation between actual export s(P_DA) and P_grid
-                    -(m.P_grid[t] - m.DA_export[t]) * m.price_imb[t] * dt / 1000
+                    +(m.P_grid[t] - m.DA_export[t]) * m.price_imb[t] * dt / 1000
                         for t in m.T
                 ) + sum(
                     m.r_FCR_block[i] * d.price_FCR[i] * dt_FCR
@@ -415,7 +422,7 @@ class ElectrolyzerModel:
 
 
     def run(self):
-        solver = SolverFactory('gurobi')
+        solver = SolverFactory('highs')
         solver.options['DualReductions'] = 0
         results = solver.solve(self.model, tee=True)
 
@@ -430,7 +437,7 @@ class ElectrolyzerModel:
 
         # Try IIS
         try:
-            solver = SolverFactory('gurobi')
+            solver = SolverFactory('highs')
             solver.options['IISMethod'] = 1
             solver.solve(self.model, tee=True, symbolic_solver_labels=True)
             from pyomo.util.infeasible import log_infeasible_constraints

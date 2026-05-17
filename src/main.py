@@ -45,7 +45,7 @@ A_s, B_s, P_seg_min, P_seg_max, P_total, m_dot, P_stack = generate_piecewise(
     A_cell=0.0625,
     p=40,
     p_out=45,
-    N_stacks=40*10,
+    N_stacks=40*20,
     N_cell=250,
     n_segments=3,
     plot=True  # Set to True to see plot
@@ -67,7 +67,7 @@ I = len(fcr_df)   # Number of FCR blocks (4-hour intervals)
 # Data
 wind_real = wind_df['wind_kW'].values  # Wind power [kW]
 price_real = el_price_df['el_price[EUR/MWh]'].values  # Day-ahead price [EUR/MWh]
-price_H2 = np.full(len(wind_real), 5.5)
+price_H2 = np.full(len(wind_real), 4.5) #EUR/kg
 #price_H2 = np.full(H, 5.5)  # Hydrogen price [EUR/kg], constant for now, from European Hydrogen Observatory
 price_FCR = fcr_df['price_FCR'].values  # FCR price [EUR/kW]
 FCR_volume = fcr_df['FCR_volume'].values # FCR volume [kW], using "up" as example
@@ -81,7 +81,7 @@ P_total, m_dot, P_stack = hp.electrolyzer_h2_prod_curve(
     A_cell=0.0625,
     p=40,
     p_out=45,
-    N_stacks=40*10,
+    N_stacks=40*20,
     N_cell=250
 )
 P_min = min(P_stack)      # Minimum power [kW] #CHANGE###
@@ -175,7 +175,7 @@ for day in range(num_days):
         storage_initial=storage_state,
         grid_cap=grid_cap,
         N_down=N_down,
-        FCR_volume=FCR_volume,
+        FCR_volume=FCR_volume_day,
         z_on_prev=z_on_state,
         P_prev=P_prev,
         is_DA=True,
@@ -250,7 +250,7 @@ for day in range(num_days):
 
 
     RT_model = ElectrolyzerModel(input_RT)
-    print("\n=== DAY 2 RT INPUT STATE ===")
+    print("\n=== DAY %d RT INPUT STATE ===" % (day + 1))
     print("storage_initial:", storage_state)
     print("z_on_prev:", z_on_state)
     print("P_prev:", P_prev)
@@ -294,7 +294,12 @@ for day in range(num_days):
         "P_buy_RT": P_buy_RT,
         "imbalance": np.array(P_grid) - np.array(P_DA),
         "storage_end": storage_state,
-        "Total profit": DA_model.results.objective_value + RT_model.results.objective_value - sum(h_sell_DA * price_H2_day)
+        "Total profit": DA_model.results.objective_value + RT_model.results.objective_value - sum(h_sell_DA * price_H2_day),
+        "P_curt": np.array(RT_model.results.P_curt),
+        "P_elec_RT": np.array(RT_model.results.P_elec),
+        "P_elec_DA": P_Elec_DA,
+        "imbalance": np.array(P_grid) - np.array(P_DA),
+        "storage_end": storage_state
     })
 
 # results_all.append({
@@ -330,6 +335,9 @@ h_sell_RT_full  = np.concatenate([d["h_sell_RT"] for d in results_all])
 P_buy_DA_full   = np.concatenate([d["P_buy_DA"] for d in results_all])
 P_buy_RT_full   = np.concatenate([d["P_buy_RT"] for d in results_all])
 
+
+P_curt_full     = np.concatenate([d["P_curt"] for d in results_all])
+P_elec_RT_full     = np.concatenate([d["P_elec_RT"] for d in results_all])
 # Actual and forecast wind for same simulation period
 wind_real_full = wind_real[:len(P_DA_full)]
 wind_fc_full   = wind_forecast[:len(P_DA_full)]
@@ -426,6 +434,15 @@ plt.grid()
 
 plt.show()
 
+#plot storage levels
+plt.figure(figsize=(15,5))
+plt.plot([d["storage_end"] for d in results_all])
+plt.title("Storage Level at End of Each Day")
+plt.xlabel("Day")
+plt.ylabel("Storage Level [kg]")
+plt.grid()
+plt.show()
+
 
 print("Total DA profit:", total_profit_DA)
 print("Total RT profit:", total_profit_RT)
@@ -434,7 +451,7 @@ wind_real_full     = wind_real[:len(P_DA_full)]
 wind_forecast_full = wind_forecast[:len(P_DA_full)]
 
 forecast_error = wind_real_full - wind_forecast_full      # e_wind[t]
-imbalance_full = P_DA_full - P_grid_full                  # your sign
+imbalance_full = P_grid_full - P_DA_full                  # your sign
 
 print("Corr(forecast_error, -imbalance):",
       np.corrcoef(forecast_error, -imbalance_full)[0, 1])
