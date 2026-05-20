@@ -258,7 +258,7 @@ if __name__ == "__main__":
   
 
 
-    P_total, m_dot = electrolyzer_h2_prod_curve(
+    P_total, m_dot, P_stack = electrolyzer_h2_prod_curve(
     T_static, I_range, A_cell, p, p_out, N_stacks, N_cell
     )   
 
@@ -327,7 +327,7 @@ if __name__ == "__main__":
     plt.figure(figsize=(10, 6))
 
     for T_plot, c in zip(temperatures_H2_prod, colors):
-        P_temp, m_dot_temp = electrolyzer_h2_prod_curve(
+        P_temp, m_dot_temp, P_stack_temp = electrolyzer_h2_prod_curve(
             T_plot, I_range, A_cell, p, p_out, N_stacks, N_cell
         )
         plt.plot(P_temp, m_dot_temp, '-o', color=c, markersize=4, linewidth=1.5,

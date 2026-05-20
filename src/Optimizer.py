@@ -105,7 +105,7 @@ class ElectrolyzerModel:
         if d.is_DA:
             m.P_DA = Var(m.T, bounds=(-d.grid_cap, None))
         else:
-            m.P_grid = Var(m.T, bounds=(-d.grid_cap, None))
+            m.P_grid = Var(m.T, bounds=(0, None))
         m.dev = Var(m.T, domain=NonNegativeReals)
 
         m.deficit = Var(m.T, domain=NonNegativeReals)
@@ -119,7 +119,10 @@ class ElectrolyzerModel:
 
         m.storage = Var(m.T, domain=NonNegativeReals)
 
-        m.dev_elec = Var(m.T, domain=NonNegativeReals) #Consider removing this
+        #m.dev_elec = Var(m.T, domain=NonNegativeReals) #Consider removing this
+        m.dev_pos = Var(m.T, domain=NonNegativeReals)  # P_grid > P_DA
+        m.dev_neg = Var(m.T, domain=NonNegativeReals)  # P_grid < P_DA
+
 
         if d.is_DA:
             m.r_FCR_block = Var(m.I, domain=NonNegativeReals)
@@ -283,11 +286,37 @@ class ElectrolyzerModel:
             )
         m.wind_balance = Constraint(m.T, rule=wind_balance_rule)
 
-        # --- GRID BUY LOGIC ---
-        # def grid_sell_rule(m, t):
-        #     return m.P_DA[t] <= d.grid_cap
-        # m.grid_sell = Constraint(m.T, rule=grid_sell_rule)
+        #No P_buy and P_curt at the same time
+        def no_buy_curt_rule(m, t):
+            return m.P_buy[t] * m.P_curt[t] == 0
+        m.no_buy_curt = Constraint(m.T, rule=no_buy_curt_rule)
 
+        if d.is_DA:
+            # Binary: 1 = P_DA is non-negative (exporting), 0 = P_DA may be negative (importing)
+            m.import_flag = Var(m.T, domain=Binary)
+            M = d.grid_cap+200000  # big-M, use grid capacity as the upper bound
+
+            # If import_flag = 0 → P_DA >= 0 (no import allowed)
+            # If import_flag = 1 → P_curt = 0 (no curtailment allowed)
+            def no_import_if_curt(m, t):
+                # P_DA >= -M * import_flag  →  if flag=0, P_DA >= 0
+                return m.P_DA[t] >= -M * m.import_flag[t]
+            m.no_import_if_curt = Constraint(m.T, rule=no_import_if_curt)
+
+            def no_curt_if_import(m, t):
+                # P_curt <= M * (1 - import_flag)  →  if flag=1, P_curt = 0
+                return m.P_curt[t] <= M * (1 - m.import_flag[t])
+            m.no_curt_if_import = Constraint(m.T, rule=no_curt_if_import)
+        #No import P_DA and curtailment at the same time in DA
+        # def no_curt_and_import_DA(m, t):
+        #     if d.is_DA:
+        #         if m.P_DA[t] < 0:
+        #             return m.P_DA[t] * m.P_curt[t] == 0
+        #         else:
+        #             return Constraint.Skip  # No import, so no conflict with curtailment
+        #     else:
+        #         return Constraint.Skip
+        # m.no_curt_import_DA = Constraint(m.T, rule=no_curt_and_import_DA)
 
         def deficit_rule(m, t):
             return m.deficit[t] >= (
@@ -371,14 +400,14 @@ class ElectrolyzerModel:
 
         # m.P_grid_min_con = Constraint(m.T, rule=P_grid_min_rule)
 
-        # if not d.is_DA:
-        #     def dev_pos(m, t):
-        #         return m.dev[t] >= m.P_grid[t] - m.DA_export[t]
-        #     m.dev_pos = Constraint(m.T, rule=dev_pos)
+        if not d.is_DA:
+            def dev_pos_rule(m, t):
+                return m.dev_pos[t] >= m.P_grid[t] - m.DA_export[t]
+            m.dev_pos_con = Constraint(m.T, rule=dev_pos_rule)
 
-        #     def dev_neg(m, t):
-        #         return m.dev[t] >= -(m.P_grid[t] - m.DA_export[t])
-        #     m.dev_neg = Constraint(m.T, rule=dev_neg)
+            def dev_neg_rule(m, t):
+                return m.dev_neg[t] >= m.DA_export[t] - m.P_grid[t]
+            m.dev_neg_con = Constraint(m.T, rule=dev_neg_rule)
 
 
         #Rolling horizon constraints:
@@ -391,6 +420,7 @@ class ElectrolyzerModel:
         d = self.data
         dt = 0.25
         dt_FCR = 16
+        penalty = 83
 
         if d.is_DA:
             # DAY-AHEAD: forecast-based, no imbalance
@@ -409,8 +439,10 @@ class ElectrolyzerModel:
                 return sum(
                     m.h_sell[t] * d.price_H2[t] * dt
                     - m.P_buy[t] * d.price_DA[t] * dt / 1000
+                    #+ m.DA_export[t] * d.price_DA[t] * dt / 1000
                     # DA revenue on fixed P_grid
                     # imbalance on deviation between actual export s(P_DA) and P_grid
+                    #- (m.dev_pos[t] + m.dev_neg[t]) * penalty * dt / 1000
                     +(m.P_grid[t] - m.DA_export[t]) * m.price_imb[t] * dt / 1000
                         for t in m.T
                 ) + sum(
@@ -422,7 +454,7 @@ class ElectrolyzerModel:
 
 
     def run(self):
-        solver = SolverFactory('highs')
+        solver = SolverFactory('gurobi')
         solver.options['DualReductions'] = 0
         results = solver.solve(self.model, tee=True)
 
@@ -437,7 +469,7 @@ class ElectrolyzerModel:
 
         # Try IIS
         try:
-            solver = SolverFactory('highs')
+            solver = SolverFactory('gurobi')
             solver.options['IISMethod'] = 1
             solver.solve(self.model, tee=True, symbolic_solver_labels=True)
             from pyomo.util.infeasible import log_infeasible_constraints
@@ -485,7 +517,7 @@ class ElectrolyzerModel:
         #     for t in self.model.T
         # }
         self.results.objective_value = value(m.obj)
-        self.results.r_FCR_block = {i: value(m.r_FCR_block[i]) for i in m.I}
+        self.results.r_FCR_block = np.array([value(m.r_FCR_block[i]) for i in m.I])
         # print("Saved results: P_DA length =", len(self.results.P_DA) if self.results.P_DA is not None else None)
         # print("\n=== IIS CONSTRAINTS ===")
         # for c in m.component_objects(Constraint, active=True):
