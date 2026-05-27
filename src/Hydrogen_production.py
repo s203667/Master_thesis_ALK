@@ -1,5 +1,6 @@
 import numpy as np
 import matplotlib.pyplot as plt
+from scipy.interpolate import interp1d
 
 def simple_h2_prod(eff_kWh_per_Nm3=3.86):
 
@@ -20,23 +21,27 @@ def simple_h2_prod(eff_kWh_per_Nm3=3.86):
     """
 
     load = np.array([0.25,0.5,0.75,1.0])
+    eff  = np.array([3.68,3.77,3.82, 3.86])
+
     P_max = 4000
     Nm3_to_kg = 0.0899
     P_kW = load * P_max
 
-    h = (P_kW / eff_kWh_per_Nm3) * Nm3_to_kg
+    h = (P_kW / eff) * Nm3_to_kg
     return P_kW, h
+
+
 
 def electrolyzer_UI_curve(
         I_range,
         T=80.0,          # °C
         p=1.0,           # bar (or same units as in fitted d2)
         A=0.0625,          # m^2
-        r1 = 0.7*4.45153E-05,#Changed fron andrea Gloppen. Based on Hysata 290 mOhm/cm2 at 25 °C, but no reason for the scale yet. 
-        r2 = 0.7*6.88874E-09,
-        d1 = 0.7*-3.12996E-06,
-        d2 = 0.7*4.47137E-07,
-        s = 0.7*0.33824,
+        r1 = 4.45153E-05,#Changed fron andrea Gloppen. Based on Hysata 290 mOhm/cm2 at 25 °C, but no reason for the scale yet. 
+        r2 = 1*6.88874E-09,
+        d1 = 1*-3.12996E-06,
+        d2 = 1*4.47137E-07,
+        s = 0.70*0.33824,
         t1 = -0.01539,
         t2 = 2.00181,
         t3 = 15.24178,
@@ -173,7 +178,7 @@ def Eff_models(T, j, p, U_cell):
     eta_v = U_tn_eq / U_cell                 # array over j
 
     eta_tot = eta_f * eta_v
-    return eta_f, eta_v, eta_tot
+    return eta_tot, eta_v, eta_f
 
 
 def H2_rate(T, p, j, A_cell, N_cell, eta_f):
@@ -192,7 +197,7 @@ def H2_rate(T, p, j, A_cell, N_cell, eta_f):
 def electrolyzer_h2_prod_curve(T, I_range, A_cell, p, p_out, N_stacks, N_cell):
     j = I_range / A_cell
     _, _, U_cell = electrolyzer_UI_curve(I_range, T=T, p=p, A=A_cell, plot=False)
-    eta_f, _, _ = Eff_models(T, j, p, U_cell)
+    _, _, eta_f = Eff_models(T, j, p, U_cell)
     m_dot = N_stacks * H2_rate(T, p, j, A_cell, N_cell, eta_f)
 
     P_stack = N_stacks * N_cell * U_cell * I_range / 1000  # kW
@@ -220,10 +225,10 @@ if __name__ == "__main__":
     # system parameters
     A_cell = 0.0625
     T_static = 80
-    p = 40
-    p_out = 45
+    p = 60
+    p_out = 250
     N_cell = 250
-    N_stacks = 40
+    N_stacks = 35
  
     #I_range = np.linspace(5, 5500, 50)  # Current range from 5 to 300 A
     j_mA_cm2 = np.linspace(1, 400, 50)
@@ -290,7 +295,7 @@ if __name__ == "__main__":
     ss_tot = np.sum((m_dot - np.mean(m_dot))**2)
     r_squared = 1 - (ss_res / ss_tot)
 
-    eta_tot, eta_f, eta_v = Eff_models(T_static, j, p, U_cell)
+    eta_tot, eta_v, eta_f = Eff_models(T_static, j, p, U_cell)
     
     # 🔹 Plot 1: Electrolyzer model with efficiency and linear fit
     fig1, ax1_1 = plt.subplots(figsize=(10, 6))
@@ -321,7 +326,7 @@ if __name__ == "__main__":
     
     plt.show()
     
-    temperatures_H2_prod = [50, 60, 70, 80, 90, 100, 110]   # three temperatures you want to compare
+    temperatures_H2_prod = [ 80]   # three temperatures you want to compare
     colors = ["blue", "green", "red", "cyan", "magenta", "orange", "purple"]
     # 🔹 Plot 2: Electrolyzer model vs Simple model comparison
     plt.figure(figsize=(10, 6))
@@ -332,6 +337,8 @@ if __name__ == "__main__":
         )
         plt.plot(P_temp, m_dot_temp, '-o', color=c, markersize=4, linewidth=1.5,
                  label=f'Electrolyzer model T={T_plot} °C')
+        
+
 
     # Add the hydrogen_production curve
     P_simple, h_simple = simple_h2_prod(eff_kWh_per_Nm3=3.86)
@@ -361,3 +368,53 @@ if __name__ == "__main__":
     print("U_cell max:", U_cell[-1])
     print("new slope:", m_dot[-1] / P_total[-1])
     
+#plot power vs specific energy (kWh/kg) for the electrolyzer model
+    E_spec_kWh_per_kg = P_total / m_dot  # kWh/kg
+
+
+    #print hydrogen production vs power input data for 80 degrees
+        
+    print(f"Hydrogen production at {T_plot} °C:")
+    for i in range(len(P_temp)):
+        print(f"  Power: {P_temp[i]:.2f} kW, Production: {m_dot_temp[i]:.4f} kg/h") 
+
+    
+    load = np.array([0.25, 0.5, 0.75, 1.0])
+    P_max = max(P_total)  # kW
+    P_points = load * P_max
+    # --- MODEL RESULTS ---
+    P_total, m_dot, P_stack = electrolyzer_h2_prod_curve(
+        T_static, I_range, A_cell, p, p_out, N_stacks, N_cell
+    )
+
+    # Interpolators
+    m_dot_f = interp1d(P_total, m_dot, fill_value="extrapolate")
+    P_stack_f = interp1d(P_total, P_stack, fill_value="extrapolate")
+
+    # constants
+    Nm3_to_kg = 0.0899
+    HHV_kWh_per_kg = 39.4
+
+    # --- evaluation points ---
+    load = np.array([0.25, 0.5, 0.75, 1.0])
+    P_eval = load * P_max
+
+    m_eval = m_dot_f(P_eval)
+    P_stack_eval = P_stack_f(P_eval)
+
+    E_kWh_per_kg = P_stack_eval / m_eval
+    E_kWh_per_Nm3 = E_kWh_per_kg * Nm3_to_kg
+
+    eta_HHV = (m_eval * HHV_kWh_per_kg / P_stack_eval) * 100
+
+    print("\n--- MODEL vs SHIPTOWN STYLE TABLE ---\n")
+
+    print(f"{'Load':>6} {'P (kW)':>10} {'kWh/Nm3':>12} {'HHV %':>10}")
+
+    for i in range(len(load)):
+        print(
+            f"{load[i]:6.2f} "
+            f"{P_eval[i]:10.1f} "
+            f"{E_kWh_per_Nm3[i]:12.2f} "
+            f"{eta_HHV[i]:10.1f}"
+        )

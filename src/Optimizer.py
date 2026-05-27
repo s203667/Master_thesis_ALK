@@ -13,7 +13,7 @@ class InputData:
                  P_min, P_max, P_sb,
                  P_seg_min, P_seg_max,
                  A_s, B_s,
-                 storage_max, storage_initial, grid_cap,
+                 storage_max, storage_initial, h_min_daily, h_sell_max, grid_cap,
                  N_down, FCR_volume, z_on_prev=0, P_prev=0, is_DA = False, DA_export = None):
 
         self.T = T              # time steps
@@ -41,6 +41,8 @@ class InputData:
 
         self.storage_max = storage_max
         self.storage_initial = storage_initial
+        self.h_min_daily = h_min_daily
+        self.h_sell_max = h_sell_max
         self.grid_cap = grid_cap
         self.N_down = N_down
         self.P_min_bid = 1000 # Minimum bid size for FCR [kW]
@@ -176,7 +178,8 @@ class ElectrolyzerModel:
             block_size = 16  # 4 hours / 15 min
             return t // block_size 
 
-         #Piecewise bounds
+         #Piecewise bounds 
+         #OVERFØRT
         def seg_min_rule(m, t, s):
             return m.P_seg[t, s] >= d.P_seg_min[s] * m.z_seg[t, s]
         m.seg_min = Constraint(m.T, m.S, rule=seg_min_rule)
@@ -186,16 +189,19 @@ class ElectrolyzerModel:
         m.seg_max = Constraint(m.T, m.S, rule=seg_max_rule)
 
         #Only one segment active when z_on=1. When z_on=0, all z_seg must be 0 and z_sb has its own constraint
+        #OVERFØRT
         def one_seg_rule(m, t):
             return sum(m.z_seg[t, s] for s in m.S) == m.z_on[t]
         m.one_seg = Constraint(m.T, rule=one_seg_rule)
 
         #Only one state active
+        #OVERFØRT
         def state_rule(m, t):
             return m.z_on[t] + m.z_sb[t] + m.z_off[t] == 1
         m.state = Constraint(m.T, rule=state_rule)
 
          #Total power
+         #OVERFØRT
         def total_power_rule(m, t):
             return (
                 sum(m.P_seg[t, s] for s in m.S)
@@ -206,6 +212,7 @@ class ElectrolyzerModel:
         m.total_power = Constraint(m.T, rule=total_power_rule)
 
         # Minimum load constraint
+        #OVERFØRT
         def min_load_rule(m, t):
             #if t == 0:
              #   return Constraint.Skip
@@ -218,6 +225,7 @@ class ElectrolyzerModel:
         m.min_load = Constraint(m.T, rule=min_load_rule)
 
         #Hydrogen production
+        #OVERFØRT
         def h2_rule(m, t):
             dt = 0.25
             return m.h[t] == sum(d.A_s[s] * m.P_seg[t, s] + d.B_s[s] * m.z_seg[t, s] for s in m.S)
@@ -225,12 +233,14 @@ class ElectrolyzerModel:
 
 
         #Standby power
+        #OVERFØRT
         def standby_power_rule(m, t):
             return m.P_sb[t] == d.P_sb * m.z_sb[t]
         m.standby_power = Constraint(m.T, rule=standby_power_rule)
 
 
         #shutdown
+        #OVERFØRT
         def shutdown_def(m, t):
             if t == 0:
                 return Constraint.Skip
@@ -239,6 +249,7 @@ class ElectrolyzerModel:
         
 
         # Minimum downtime
+        #OVERFØRT
         def downtime_rule(m, t):
             return sum(
                 m.z_off[k] for k in range(t, min(t + d.N_down, d.T))
@@ -258,17 +269,28 @@ class ElectrolyzerModel:
             return m.storage[t] <= d.storage_max
         m.storage_bound = Constraint(m.T, rule=storage_bound_rule)
 
-        def h_sell_prod_limit(m, t):
+        def h_sell_prod_limit(m, t): 
             if t == 0:
                 return m.h_sell[t] <= m.h[t] + m.storage[T_last]
             return m.h_sell[t] <= m.h[t] + m.storage[t-1]  # Can only sell what is produced plus what's in storage
         m.h_sell_prod_limit = Constraint(m.T, rule=h_sell_prod_limit)
 
 
+        # Minimum daily hydrogen delivery (makes storage worth using as a buffer)
+        def min_daily_h2(m):
+            return sum(m.h_sell[t] for t in m.T) >= d.h_min_daily
+        m.min_daily_delivery = Constraint(rule=min_daily_h2)
+
+        # Maximum sell rate per timestep (physical pipeline/truck limit)
+        # Without this, storage is never needed — model just sells everything instantly
+        def max_sell_rate(m, t):
+            return m.h_sell[t] <= d.h_sell_max   # kg per 15-min slot
+        m.max_sell_rate_con = Constraint(m.T, rule=max_sell_rate)
 
         #--- add storage start and end constraints ---
 
         # --- WIND–ELECTROLYZER POWER BALANCE ---
+        #OVERFØRT
         if d.is_DA:
             export_var = m.P_DA
             m.P_buy.fix(0)  # No buying in DA, only selling
@@ -339,6 +361,7 @@ class ElectrolyzerModel:
         m.buy_use_limit = Constraint(m.T, rule=buy_use_limit)
 
         if d.is_DA:
+            #OVERFØRT
             def fcr_min_rule(m, i):
                 return m.r_FCR_block[i] >= d.P_min_bid * m.z_FCR[i]
             m.fcr_min = Constraint(m.I, rule=fcr_min_rule)
@@ -353,7 +376,7 @@ class ElectrolyzerModel:
             #     return m.z_FCR[i] <= m.z_on[i*16]
             # m.fcr_on_block = Constraint(m.I, rule=fcr_on_block_rule)
 
-            def fcr_on_block_rule(m, i):
+            def fcr_on_block_rule(m, i): #SE NÆRMERE PÅ DENNE
                 t = i * 16
                 if t >= d.T:
                     return Constraint.Skip
@@ -364,6 +387,7 @@ class ElectrolyzerModel:
             pass # In RT, FCR is fixed from DA, so no need for these constraints
 
         # ramping consraints
+        #OVERFØRT
         def ramp_up_rule(m, t):
             dR_up = 100000 # kW/15Min #PLACEHOLDER
             if t == 0:
@@ -419,7 +443,7 @@ class ElectrolyzerModel:
         m = self.model
         d = self.data
         dt = 0.25
-        dt_FCR = 16
+        dt_FCR = 4
         penalty = 83
 
         if d.is_DA:

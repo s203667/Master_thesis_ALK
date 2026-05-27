@@ -13,7 +13,7 @@ from matplotlib.colors import TwoSlopeNorm
 print("Preparing data...")
 prep = DataPreparationCSV(
     start_date="2025-03-05",
-    end_date="2025-04-05",
+    end_date="2025-10-05",
     el_price_file_name="DayAheadPrices.csv", 
     wind_file_name="WindProd5MinRealtime.csv",  # Update if data_prep changes
     fcr_file_name="FcrDK1.csv",  
@@ -46,7 +46,7 @@ A_s, B_s, P_seg_min, P_seg_max, P_total, m_dot, P_stack = generate_piecewise(
     I_range=I_range,
     A_cell=0.0625,
     p=40,
-    p_out=45,
+    p_out=300,
     N_stacks=40*20,
     N_cell=250,
     n_segments=3,
@@ -74,7 +74,8 @@ price_H2 = np.full(len(wind_real), 4.5) #EUR/kg
 price_FCR = fcr_df['price_FCR'].values  # FCR price [EUR/kW]
 FCR_volume = fcr_df['FCR_volume'].values # FCR volume [kW], using "up" as example
 grid_cap = 40000.0  # Max grid power [kW], adjust as needed
-
+h_min_daily = 0.0  # Minimum daily hydrogen production [kg], adjust as needed
+h_sell_max =200000.0   # Maximum sell rate per timestep [kg], adjust as needed
 
 # Electrolyzer parameters
 P_total, m_dot, P_stack = hp.electrolyzer_h2_prod_curve(
@@ -109,7 +110,7 @@ price_forecast[:lag] = price_real[:lag]
 
 #r_FCR_block = 0  ####TEMPORARILY WHILE TESTING #####
 # Storage parameters
-storage_max = 10000.0     # Max storage [kg]
+storage_max =0.0  #50000   # Max storage [kg]
 storage_initial = 0.0     # Initial storage [kg]
 N_down = 3             # Downtime in 15min intervals, adjust as needed
 
@@ -120,7 +121,7 @@ z_on_state = 0
 P_prev = 0
 
 TIMESTEPS_PER_DAY = 96
-num_days =  20#len(wind_real) // TIMESTEPS_PER_DAY
+num_days =  40#len(wind_real) // TIMESTEPS_PER_DAY
 
 blocks_per_day = TIMESTEPS_PER_DAY // 16
 
@@ -175,6 +176,8 @@ for day in range(num_days):
         B_s=B_s,
         storage_max=storage_max,
         storage_initial=storage_state,
+        h_min_daily=h_min_daily,
+        h_sell_max=h_sell_max,
         grid_cap=grid_cap,
         N_down=N_down,
         FCR_volume=FCR_volume_day,
@@ -194,15 +197,17 @@ for day in range(num_days):
     print(f"  storage_initial passed to model: {storage_state}")
 
 
-    P_DA = np.array(DA_model.results.P_DA) # DA export schedule
+    
     P_Elec_DA = np.array([
         sum(DA_model.model.P_seg[t, s].value for s in DA_model.model.S)
         + DA_model.model.P_sb[t].value
         for t in DA_model.model.T
     ])
 
+    P_DA = np.array(DA_model.results.P_DA) # DA export schedule
     h_sell_DA = np.array(DA_model.results.h_sell)
-    P_buy_DA = np.array(DA_model.results.P_buy)
+    P_curt_DA = np.array(DA_model.results.P_curt)
+    #P_buy_DA = np.array(DA_model.results.P_buy)
     DA_objectives.append(DA_model.results.objective_value)
     r_FCR_DA = DA_model.results.r_FCR_block
     print("\n=== DAY 2 DA SUMMARY ===")
@@ -241,6 +246,8 @@ for day in range(num_days):
         B_s=B_s,
         storage_max=storage_max,
         storage_initial=storage_state,
+        h_min_daily=h_min_daily,
+        h_sell_max=h_sell_max,
         grid_cap=grid_cap,
         N_down=N_down,
         FCR_volume=FCR_volume_day,
@@ -267,7 +274,7 @@ for day in range(num_days):
     P_buy_RT  = np.array(RT_model.results.P_buy)
 
     RT_objectives.append(RT_model.results.objective_value)
-    
+    P_curt_RT = np.array(RT_model.results.P_curt)
     #Update states for next day
     storage_state = RT_model.results.storage[-1]
     z_on_state = RT_model.results.z_on[-1]
@@ -286,17 +293,18 @@ for day in range(num_days):
     print("  P_min:", P_min, "P_max:", P_max)
     print("  first few wind_rt_day:", wind_rt_day[:10])
     print("  storage_state at start:", storage_state)
-        #Save results
+
+    #Save results
     results_all.append({
         "P_DA": P_DA,
         "P_grid": P_grid,
         "h_sell_DA": h_sell_DA,
         "h_sell_RT": h_sell_RT,
-        "P_buy_DA": P_buy_DA,
+        "P_curt_DA": P_curt_DA,
         "P_buy_RT": P_buy_RT,
         "imbalance": np.array(P_grid) - np.array(P_DA),
         "Total profit": DA_model.results.objective_value + RT_model.results.objective_value - sum(h_sell_DA * price_H2_day),
-        "P_curt": np.array(RT_model.results.P_curt),
+        "P_curt_RT": np.array(RT_model.results.P_curt),
         "P_elec_RT": np.array(RT_model.results.P_elec),
         "P_elec_DA": P_Elec_DA,
         "imbalance": np.array(P_grid) - np.array(P_DA),
@@ -306,6 +314,7 @@ for day in range(num_days):
         "DA_FCR": DA_model.results.r_FCR_block,       # array shape (I,)
         "NameDA_FCR": r_FCR_DA,
         "z_on_RT": np.array(RT_model.results.z_on),
+        "z_off_RT": np.array(RT_model.results.z_off),
         "wind_real": wind_rt_day,
         "wind_forecast": wind_fc_day,
     })
@@ -340,11 +349,13 @@ imbalance_full  = np.concatenate([d["imbalance"] for d in results_all])
 h_sell_DA_full  = np.concatenate([d["h_sell_DA"] for d in results_all])
 h_sell_RT_full  = np.concatenate([d["h_sell_RT"] for d in results_all])
 
-P_buy_DA_full   = np.concatenate([d["P_buy_DA"] for d in results_all])
+#P_buy_DA_full   = np.concatenate([d["P_buy_DA"] for d in results_all])
 P_buy_RT_full   = np.concatenate([d["P_buy_RT"] for d in results_all])
 
 
-P_curt_full     = np.concatenate([d["P_curt"] for d in results_all])
+P_curt_full_RT     = np.concatenate([d["P_curt_RT"] for d in results_all])
+P_curt_full_DA     = np.concatenate([d["P_curt_DA"] for d in results_all])
+
 P_elec_RT_full     = np.concatenate([d["P_elec_RT"] for d in results_all])
 # Actual and forecast wind for same simulation period
 wind_real_full = wind_real[:len(P_DA_full)]
@@ -518,7 +529,7 @@ num_days = len(results_all)
 # Re-build arrays that may not exist yet at this point in main.py
 P_elec_DA_full = np.concatenate([d["P_elec_DA"] for d in results_all])
 P_elec_RT_full = np.concatenate([d["P_elec_RT"] for d in results_all])
-P_curt_full    = np.concatenate([d["P_curt"]    for d in results_all])
+P_curt_full    = np.concatenate([d["P_curt_RT"]    for d in results_all])
 
 # Collect z_on from each day's RT model  ← you need to save this in results_all
 # Add  "z_on_RT": np.array(RT_model.results.z_on)  to your results_all.append() call.
@@ -946,7 +957,7 @@ TIMESTEPS_PER_DAY = 96
 dt = 0.25
 
 P_buy_RT_full   = np.concatenate([d["P_buy_RT"]  for d in results_all])
-P_curt_full     = np.concatenate([d["P_curt"]    for d in results_all])
+P_curt_RT_full  = np.concatenate([d["P_curt_RT"] for d in results_all])
 P_grid_full     = np.concatenate([d["P_grid"]    for d in results_all])
 P_DA_full       = np.concatenate([d["P_DA"]      for d in results_all])
 P_elec_RT_full  = np.concatenate([d["P_elec_RT"] for d in results_all])
@@ -956,7 +967,7 @@ storage_full    = np.concatenate([d["storage"]   for d in results_all])
 T = len(P_buy_RT_full)
 
 # ── 1. Simultaneous curtailment AND buying ───────────────────────────────
-both_mask = (P_buy_RT_full > 1) & (P_curt_full > 1)
+both_mask = (P_buy_RT_full > 1) & (P_curt_RT_full > 1)
 n_both    = both_mask.sum()
 pct_both  = 100 * n_both / T
 
@@ -964,13 +975,13 @@ print("\n── Simultaneous P_buy + curtailment ──────────�
 print(f"  Timesteps with BOTH P_buy>0 and P_curt>0 : {n_both} / {T}  ({pct_both:.1f} %)")
 if n_both > 0:
     print(f"  Mean P_buy   during overlap : {P_buy_RT_full[both_mask].mean():,.0f} kW")
-    print(f"  Mean P_curt  during overlap : {P_curt_full[both_mask].mean():,.0f} kW")
+    print(f"  Mean P_curt  during overlap : {P_curt_RT_full[both_mask].mean():,.0f} kW")
     print(f"  → This is economically irrational and indicates a model bug.")
 
 # ── 2. Wind balance check ────────────────────────────────────────────────
 # wind + P_buy should == P_elec + P_curt + P_grid  (ignoring standby which is small)
 lhs = wind_RT_full + P_buy_RT_full
-rhs = P_elec_RT_full + P_curt_full + P_grid_full
+rhs = P_elec_RT_full + P_curt_RT_full + P_grid_full
 residual = lhs - rhs
 print("\n── Wind balance residual (should be ~0) ──────────────────────")
 print(f"  Max  |residual| : {np.abs(residual).max():,.1f} kW")
@@ -983,12 +994,12 @@ print("\n── When does curtailment happen? ───────────�
 
 # A: electrolyzer at P_max
 elec_at_max = P_elec_RT_full > (0.98 * P_elec_RT_full.max())
-curt_at_elec_max = (P_curt_full > 1) & elec_at_max
+curt_at_elec_max = (P_curt_RT_full > 1) & elec_at_max
 print(f"  Elec at P_max AND curtailing     : {curt_at_elec_max.sum()} ts")
 
 # B: P_grid at grid_cap (need to know grid_cap — adjust if different)
 grid_cap = P_grid_full.max()  # inferred; replace with actual value
-curt_at_grid_cap = (P_curt_full > 1) & (P_grid_full > 0.98 * grid_cap)
+curt_at_grid_cap = (P_curt_RT_full > 1) & (P_grid_full > 0.98 * grid_cap)
 print(f"  P_grid near cap AND curtailing   : {curt_at_grid_cap.sum()} ts  (inferred cap={grid_cap:,.0f} kW)")
 
 # C: P_grid constrained by proximity to P_DA (deviation limit?)
@@ -999,11 +1010,11 @@ print(f"  Max negative deviation P_grid-P_DA : {deviation.min():,.0f} kW")
 print(f"  Mean deviation                     : {deviation.mean():,.0f} kW")
 # If max positive deviation is suspiciously round (e.g. exactly 10000, 50000),
 # it suggests a hard deviation cap is binding
-curt_with_large_dev = (P_curt_full > 1) & (deviation > 0.95 * max_pos_dev)
+curt_with_large_dev = (P_curt_RT_full > 1) & (deviation > 0.95 * max_pos_dev)
 print(f"  Curtailment timesteps where deviation near max : {curt_with_large_dev.sum()}")
 
 # ── 4. Day 1 deep dive (worst curtailment daSy) ──────────────────────────
-print("\n── Day 1 detail ────────────────────────────")
+print("\n── Day 2 detail ────────────────────────────")
 sl = slice(1, TIMESTEPS_PER_DAY)
 for label, arr in [
     ("wind_RT  ", wind_RT_full[sl]),
@@ -1012,7 +1023,7 @@ for label, arr in [
     ("P_grid   ", P_grid_full[sl]),
     ("P_DA     ", P_DA_full[sl]),
     ("P_buy    ", P_buy_RT_full[sl]),
-    ("P_curt   ", P_curt_full[sl]),
+    ("P_curt   ", P_curt_RT_full[sl]),
     ("storage  ", storage_full[sl]),
 ]:
     print(f"  {label}  min={arr.min():>10,.0f}  max={arr.max():>10,.0f}  mean={arr.mean():>10,.0f}")
