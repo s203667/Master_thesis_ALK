@@ -9,11 +9,19 @@ import matplotlib.pyplot as plt
 import matplotlib.gridspec as gridspec
 from matplotlib.colors import TwoSlopeNorm
 
+
+USE_STOCHASTIC = False
+N_SCENARIOS    = 20
+N_NEIGHBORS    = 50
+
+from Scenario_gen import compute_forecast_errors, generate_scenarios
+from StochasticOptimizer import StochasticInputData, StochasticElectrolyzerModel
+
 # --- DATA PREPARATION --- #
 print("Preparing data...")
 prep = DataPreparationCSV(
     start_date="2025-03-05",
-    end_date="2025-10-05",
+    end_date="2026-03-05",
     el_price_file_name="DayAheadPrices.csv", 
     wind_file_name="WindProd5MinRealtime.csv",  # Update if data_prep changes
     fcr_file_name="FcrDK1.csv",  
@@ -94,16 +102,23 @@ P_sb = min(P_stack)     # Standby power [kW] #CHANGE###
 #Add "Forecast" that is just the day before repeated
 lag = 96  # 1 day
 
+# --- Compute historical forecast errors (once, before day loop) ---
+price_errors, wind_errors, imb_errors, wind_forecasts = compute_forecast_errors(
+    price_real, wind_real, imbalance_price, lag=96
+)
+
  #FCR is daily blocks, not per timestep
 
-wind_forecast = np.roll(wind_real, lag)
-price_forecast = np.roll(price_real, lag)
+
 
 # For the first day, fill with actual values (or zeros)
 wind_forecast = np.roll(wind_real, lag)
 price_forecast = np.roll(price_real, lag)
+imbalance_forecast = np.roll(imbalance_price, lag)
+
 wind_forecast[:lag] = wind_real[:lag]
 price_forecast[:lag] = price_real[:lag]
+imbalance_forecast[:lag] = imbalance_price[:lag]
 
 # print("NaNs in FCR price:", np.isnan(price_FCR).sum())
 # print("NaNs in FCR volume:", np.isnan(FCR_volume).sum())
@@ -121,7 +136,7 @@ z_on_state = 0
 P_prev = 0
 
 TIMESTEPS_PER_DAY = 96
-num_days =  40#len(wind_real) // TIMESTEPS_PER_DAY
+num_days =  20#len(wind_real) // TIMESTEPS_PER_DAY
 
 blocks_per_day = TIMESTEPS_PER_DAY // 16
 
@@ -148,74 +163,110 @@ for day in range(num_days):
     wind_fc_day   = wind_forecast[start:end]
     price_fc_day  = price_forecast[start:end]
     price_H2_day  = price_H2[start:end]
+    imbalance_fc_day = imbalance_forecast[start:end]
     # price_FCR_day = price_FCR[day:day+1]
     # FCR_volume_day = FCR_volume[day:day+1] #
-    print(f"\n=== DAY {day+1} INITIAL STATE ===")
-    print("storage_state:", storage_state)
-    print("z_on_state:", z_on_state)
-    print("P_prev:", P_prev)
+    # print(f"\n=== DAY {day+1} INITIAL STATE ===")
+    # print("storage_state:", storage_state)
+    # print("z_on_state:", z_on_state)
+    # print("P_prev:", P_prev)
 
     # --- 4. Build model ---
-    input_DA = InputData(
-        T=TIMESTEPS_PER_DAY,
-        S=S,
-        I=len(price_FCR_day),  # number of FCR blocks
-        wind=None,
-        wind_forecast=wind_fc_day,
-        price_DA=price_fc_day,
-        price_H2=price_H2_day,
-        price_FCR=price_FCR_day,
-        r_FCR_DA = None,
-        imbalance_price=None,
-        P_min=P_min,
-        P_max=P_max,
-        P_sb=P_sb,
-        P_seg_min=P_seg_min,
-        P_seg_max=P_seg_max,
-        A_s=A_s,
-        B_s=B_s,
-        storage_max=storage_max,
-        storage_initial=storage_state,
-        h_min_daily=h_min_daily,
-        h_sell_max=h_sell_max,
-        grid_cap=grid_cap,
-        N_down=N_down,
-        FCR_volume=FCR_volume_day,
-        z_on_prev=z_on_state,
-        P_prev=P_prev,
-        is_DA=True,
-        DA_export=None  # Not used in DA model
-    )
+    if USE_STOCHASTIC:
+        price_sc, wind_sc, imb_sc, probs = generate_scenarios(
+            price_fc_day, wind_fc_day, imbalance_fc_day,
+            price_errors, wind_errors, imb_errors, wind_forecasts,
+            n_scenarios=N_SCENARIOS, n_neighbors = N_NEIGHBORS 
+        )
+        input_DA = StochasticInputData(
+            T=TIMESTEPS_PER_DAY, S_seg=S, I=len(price_FCR_day),
+            wind_forecast=wind_fc_day,
+            price_scenarios=price_sc,
+            wind_scenarios=wind_sc,
+            imb_scenarios=imb_sc,
+            scenario_probs=probs,
+            price_H2=price_H2_day,
+            price_FCR=price_FCR_day,
+            P_min=P_min, P_max=P_max, P_sb=P_sb,
+            P_seg_min=P_seg_min, P_seg_max=P_seg_max,
+            A_s=A_s, B_s=B_s,
+            storage_max=storage_max, storage_initial=storage_state,
+            h_min_daily=h_min_daily, h_sell_max=h_sell_max,
+            grid_cap=grid_cap, N_down=N_down,
+            FCR_volume=FCR_volume_day,
+            z_on_prev=z_on_state, P_prev=P_prev
+        )
+        DA_model = StochasticElectrolyzerModel(input_DA)
+    else:
+        input_DA = InputData(
+            T=TIMESTEPS_PER_DAY,
+            S=S,
+            I=len(price_FCR_day),  # number of FCR blocks
+            wind=None,
+            wind_forecast=wind_fc_day,
+            price_DA=price_fc_day,
+            price_H2=price_H2_day,
+            price_FCR=price_FCR_day,
+            r_FCR_DA = None,
+            imbalance_price=None,
+            P_min=P_min,
+            P_max=P_max,
+            P_sb=P_sb,
+            P_seg_min=P_seg_min,
+            P_seg_max=P_seg_max,
+            A_s=A_s,
+            B_s=B_s,
+            storage_max=storage_max,
+            storage_initial=storage_state,
+            h_min_daily=h_min_daily,
+            h_sell_max=h_sell_max,
+            grid_cap=grid_cap,
+            N_down=N_down,
+            FCR_volume=FCR_volume_day,
+            z_on_prev=z_on_state,
+            P_prev=P_prev,
+            is_DA=True,
+            DA_export=None  # Not used in DA model
+        )
 
-    DA_model = ElectrolyzerModel(input_DA)
-    # print("Running DA for day", day)
-    print("storage_state:", storage_state)
-    print("z_on_state:", z_on_state)
-    print("P_prev:", P_prev)
+        DA_model = ElectrolyzerModel(input_DA)
+        # print("Running DA for day", day)
+    # print("storage_state:", storage_state)
+    # print("z_on_state:", z_on_state)
+    # print("P_prev:", P_prev)
     DA_model.run()
-    print(f"\n--- Window starting at t0={t0} ---")
-    print(f"  storage_initial passed to model: {storage_state}")
-
-
-    
-    P_Elec_DA = np.array([
-        sum(DA_model.model.P_seg[t, s].value for s in DA_model.model.S)
-        + DA_model.model.P_sb[t].value
-        for t in DA_model.model.T
-    ])
+    # print(f"\n--- Window starting at t0={t0} ---")
+    # print(f"  storage_initial passed to model: {storage_state}")
 
     P_DA = np.array(DA_model.results.P_DA) # DA export schedule
     h_sell_DA = np.array(DA_model.results.h_sell)
     P_curt_DA = np.array(DA_model.results.P_curt)
-    #P_buy_DA = np.array(DA_model.results.P_buy)
+    P_buy_DA = np.array(DA_model.results.P_buy)
     DA_objectives.append(DA_model.results.objective_value)
     r_FCR_DA = DA_model.results.r_FCR_block
-    print("\n=== DAY 2 DA SUMMARY ===")
-    print("P_DA first 10:", P_DA[:10])
-    print("P_elec_DA first 10:", P_Elec_DA[:10])
-    print("h_sell_DA first 10:", h_sell_DA[:10])
-    print("storage_end_DA:", DA_model.results.storage[-1])
-    print("z_on_end_DA:", DA_model.results.z_on[-1])
+    
+    # Handle both deterministic and stochastic models
+    if USE_STOCHASTIC:
+        # For stochastic model, average across scenarios, show first scenario
+        P_Elec_DA = np.array([
+            sum(DA_model.model.P_seg[0, t, s].value for s in DA_model.model.SEG)
+            + DA_model.model.P_sb[0, t].value
+            for t in DA_model.model.T
+        ])
+    else:
+        # For deterministic model
+        P_Elec_DA = np.array([
+            sum(DA_model.model.P_seg[t, s].value for s in DA_model.model.S)
+            + DA_model.model.P_sb[t].value
+            for t in DA_model.model.T
+        ])
+    
+    # print("\n=== DAY 2 DA SUMMARY ===")
+    # print("P_DA first 10:", P_DA[:10])
+    # print("P_elec_DA first 10:", P_Elec_DA[:10])
+    # print("h_sell_DA first 10:", h_sell_DA[:10])
+    # print("storage_end_DA:", DA_model.results.storage[-1])
+    # print("z_on_end_DA:", DA_model.results.z_on[-1])
 
     # -----------------------------
     # 3. Slice REAL DATA for RT run
@@ -382,141 +433,194 @@ for day, d in enumerate(results_all):
     print("DA FCR:", d["DA_FCR"])
     print("RT FCR:", d["FCR_blocks"])
 
+# Full-horizon series used for the summary and plots
+P_elec_DA_full = np.concatenate([d["P_elec_DA"] for d in results_all])
+P_elec_RT_full = np.concatenate([d["P_elec_RT"] for d in results_all])
+dt = 0.25
 
-plt.figure(figsize=(15,5))
+print("\n=== FULL HORIZON SUMMARY ===")
+print("Total DA objective:", total_profit_DA)
+print("Total RT objective:", total_profit_RT)
 
-plt.plot(P_DA_full, label="DA Export")
-plt.plot(P_grid_full, label="RT Export")
+# Use the full simulation series for realized revenue and imbalance analysis
+forecast_error = wind_real_full - wind_fc_full
+imbalance_full = P_grid_full - P_DA_full
 
-plt.title("DA vs RT Export")
-plt.xlabel("Timestep")
-plt.ylabel("Power [kW]")
-plt.legend()
-plt.grid()
-
-plt.show()
-
-plt.figure(figsize=(15,5))
-
-plt.plot(imbalance_full, label="Power imbalance")
-plt.plot(wind_error_full, label="Wind forecast error")
-
-plt.title("Imbalance vs Wind Forecast Error")
-plt.xlabel("Timestep")
-plt.ylabel("kW")
-plt.legend()
-plt.grid()
-
-plt.show()
-
-plt.figure(figsize=(15,5))
-
-plt.plot(P_buy_RT_full)
-
-plt.title("Real-Time Grid Purchases")
-plt.xlabel("Timestep")
-plt.ylabel("Power Bought [kW]")
-plt.grid()
-
-plt.show()
-
-plt.figure(figsize=(15,5))
-
-plt.plot(h_sell_DA_full, label="DA H2 sale")
-plt.plot(h_sell_RT_full, label="RT H2 sale")
-
-plt.title("Hydrogen Sales")
-plt.xlabel("Timestep")
-plt.ylabel("kg")
-plt.legend()
-plt.grid()
-
-plt.show()
-
-plt.figure(figsize=(6,6))
-
-plt.scatter(wind_error_full, imbalance_full, alpha=0.3)
-
-plt.xlabel("Wind Forecast Error [kW]")
-plt.ylabel("Imbalance [kW]")
-
-plt.title("Forecast Error vs Imbalance")
-plt.grid()
-
-plt.show()
-
-plt.figure(figsize=(10,5))
-
-plt.hist(imbalance_full, bins=100)
-
-plt.title("Imbalance Distribution")
-plt.xlabel("Imbalance [kW]")
-plt.ylabel("Count")
-
-plt.grid()
-
-plt.show()
-
-plt.figure(figsize=(15,5))
-
-plt.plot(wind_real_full, label="Actual Wind")
-plt.plot(wind_fc_full, label="Forecast Wind")
-
-plt.title("Wind Forecast vs Actual")
-plt.legend()
-plt.grid()
-
-plt.show()
-
-#plot storage levels
-plt.figure(figsize=(15,5))
-plt.plot([d["storage_end"] for d in results_all])
-plt.title("Storage Level at End of Each Day")
-plt.xlabel("Day")
-plt.ylabel("Storage Level [kg]")
-plt.grid()
-plt.show()
-
-
-print("Total DA profit:", total_profit_DA)
-print("Total RT profit:", total_profit_RT)
-# full series
-wind_real_full     = wind_real[:len(P_DA_full)]
-wind_forecast_full = wind_forecast[:len(P_DA_full)]
-
-forecast_error = wind_real_full - wind_forecast_full      # e_wind[t]
-imbalance_full = P_grid_full - P_DA_full                  # your sign
-
-print("Corr(forecast_error, -imbalance):",
-      np.corrcoef(forecast_error, -imbalance_full)[0, 1])
-
+print("Corr(forecast_error, -imbalance):", np.corrcoef(forecast_error, -imbalance_full)[0, 1])
 print("Mean forecast error:", np.mean(forecast_error))
 print("Mean imbalance:", np.mean(imbalance_full))
-
 print("Sum forecast error:", np.sum(forecast_error))
 print("Sum -imbalance:", -np.sum(imbalance_full))
-
-
 print("Total timesteps:", len(P_DA_full))
 print("Total imbalance:", np.sum(imbalance_full))
 
 print("=== DAY-AHEAD RESULTS ===")
-print("P_DA first 10:", P_DA[:10])
-print("Elec load DA first 10:", P_Elec_DA[:10])
-print("Total DA export:", np.sum(P_DA))
+print("P_DA_full first 10:", P_DA_full[:10])
+print("Elec load DA first 10:", P_elec_DA_full[:10])
+print("Total DA export:", np.sum(P_DA_full))
 
 print("\n=== REAL-TIME RESULTS ===")
-P_grid = RT_model.results.P_grid[:]
-P_elec_RT = RT_model.results.P_elec[:]
+print("P_grid_full first 10:", P_grid_full[:10])
+print("Elec load RT first 10:", P_elec_RT_full[:10])
+print("Total RT export:", np.sum(P_grid_full))
 
-print("P_grid first 10:", P_grid[:10])
-print("Elec load RT first 10:", P_elec_RT[:10])
-print("Total RT export:", np.sum(P_grid))
- 
 print("\n=== IMBALANCE ===")
-imbalance = np.array(P_DA) - np.array(P_grid)
-print("Imbalance first 10:", imbalance[:10])
-print("Total imbalance:", np.sum(imbalance))
+print("Imbalance_full first 10:", imbalance_full[:10])
+print("Total imbalance:", np.sum(imbalance_full))
+
+# Plot comparisons
+plt.figure(figsize=(15,5))
+plt.plot(P_DA_full, label="DA export")
+plt.plot(P_grid_full, label="RT export")
+plt.title("Full-horizon DA vs RT export")
+plt.xlabel("Timestep")
+plt.ylabel("Power [kW]")
+plt.legend()
+plt.grid()
+plt.show()
+
+plt.figure(figsize=(15,5))
+plt.plot(imbalance_full, label="Imbalance")
+plt.plot(forecast_error, label="Wind forecast error")
+plt.title("Imbalance and wind forecast error")
+plt.xlabel("Timestep")
+plt.ylabel("kW")
+plt.legend()
+plt.grid()
+plt.show()
+
+plt.figure(figsize=(15,5))
+plt.plot(h_sell_DA_full, label="DA H2 sold")
+plt.plot(h_sell_RT_full, label="RT H2 sold")
+plt.title("Hydrogen sales: DA and RT")
+plt.xlabel("Timestep")
+plt.ylabel("H2 sold [kg]")
+plt.legend()
+plt.grid()
+plt.show()
+
+plt.figure(figsize=(8,5))
+plt.scatter(forecast_error, imbalance_full, alpha=0.3)
+plt.title("Forecast error vs imbalance")
+plt.xlabel("Wind forecast error [kW]")
+plt.ylabel("Imbalance [kW]")
+plt.grid()
+plt.show()
+
+plt.figure(figsize=(10,5))
+plt.hist(imbalance_full, bins=100)
+plt.title("Imbalance distribution")
+plt.xlabel("Imbalance [kW]")
+plt.ylabel("Count")
+plt.grid()
+plt.show()
+
+plt.figure(figsize=(15,5))
+plt.plot(wind_real_full, label="Actual wind")
+plt.plot(wind_fc_full, label="Forecast wind")
+plt.title("Wind forecast vs actual")
+plt.xlabel("Timestep")
+plt.ylabel("Wind [kW]")
+plt.legend()
+plt.grid()
+plt.show()
+
+# Daily totals
+days = np.arange(len(results_all)) + 1
+DA_export_daily = np.array([d["P_DA"].sum() for d in results_all]) * dt / 1000
+RT_export_daily = np.array([d["P_grid"].sum() for d in results_all]) * dt / 1000
+H2_DA_daily = np.array([d["h_sell_DA"].sum() for d in results_all]) * dt
+H2_RT_daily = np.array([d["h_sell_RT"].sum() for d in results_all]) * dt
+Curtail_daily = np.array([d["P_curt_RT"].sum() for d in results_all]) * dt
+
+plt.figure(figsize=(12,5))
+plt.plot(days, DA_export_daily, marker='o', label='DA export (MWh/day)')
+plt.plot(days, RT_export_daily, marker='o', label='RT export (MWh/day)')
+plt.title('Daily DA and RT export')
+plt.xlabel('Day')
+plt.ylabel('Energy [MWh/day]')
+plt.legend()
+plt.grid()
+plt.show()
+
+plt.figure(figsize=(12,5))
+plt.plot(days, H2_DA_daily, marker='o', label='DA H2 sold (kg/day)')
+plt.plot(days, H2_RT_daily, marker='o', label='RT H2 sold (kg/day)')
+plt.title('Daily hydrogen sales')
+plt.xlabel('Day')
+plt.ylabel('Hydrogen sold [kg/day]')
+plt.legend()
+plt.grid()
+plt.show()
+
+plt.figure(figsize=(12,5))
+plt.bar(days, Curtail_daily)
+plt.title('Daily RT curtailment energy')
+plt.xlabel('Day')
+plt.ylabel('Curtailment [MWh/day]')
+plt.grid(axis='y')
+plt.show()
+
+#Plot a histogram of all imbalance prices
+plt.figure(figsize=(10,5))
+plt.hist(imbalance_price, bins=50, alpha=0.7)
+plt.title("Distribution of imbalance prices")
+plt.xlabel("Imbalance price [EUR/MWh]")
+plt.ylabel("Count")
+plt.grid()
+plt.show()
+
+
+# Revenue decomposition for the full horizon
+rev_elec_DA = sum(
+    P_DA_full[t] * price_forecast[t] * dt / 1000
+    for t in range(len(P_DA_full))
+)
+rev_h2_DA = sum(
+    h_sell_DA_full[t] * price_H2[t] * dt
+    for t in range(len(h_sell_DA_full))
+)
+rev_FCR = sum(
+    DA_FCR_full[i] * price_FCR[i] * 16
+    for i in range(len(DA_FCR_full))
+)
+rev_imbalance = -sum(
+    imbalance_full[t] * imbalance_price[t] * dt / 1000
+    for t in range(len(imbalance_full))
+)
+cost_buy = sum(
+    P_buy_RT_full[t] * price_real[t] * dt / 1000
+    for t in range(len(P_buy_RT_full))
+)
+rev_h2_RT = sum(
+    h_sell_RT_full[t] * price_H2[t] * dt
+    for t in range(len(h_sell_RT_full))
+)
+
+print("\n=== REVENUE BREAKDOWN ===")
+print(f"  DA electricity revenue : {rev_elec_DA:,.0f} EUR")
+print(f"  DA hydrogen revenue    : {rev_h2_DA:,.0f} EUR")
+print(f"  FCR revenue            : {rev_FCR:,.0f} EUR")
+print(f"  Imbalance settlement   : {rev_imbalance:,.0f} EUR")
+print(f"  Grid purchase cost     : {-cost_buy:,.0f} EUR")
+print(f"  RT hydrogen revenue    : {rev_h2_RT:,.0f} EUR")
+print(f"  TOTAL                  : {rev_elec_DA + rev_h2_DA + rev_FCR + rev_imbalance - cost_buy + rev_h2_RT:,.0f} EUR")
+
+total_h2_kg = (np.sum(h_sell_DA_full) + np.sum(h_sell_RT_full)) * dt
+
+# Break-even H2 price based on actual realized electricity opportunity cost
+opp_cost_elec = sum(
+    P_elec_RT_full[t] * price_real[t] * dt / 1000
+    for t in range(len(P_elec_RT_full))
+)
+if total_h2_kg > 0:
+    breakeven_h2 = opp_cost_elec / total_h2_kg
+    print(f"\n  Opportunity cost of electricity used by electrolyzer: {opp_cost_elec:,.0f} EUR")
+    print(f"  Break-even H₂ price    : {breakeven_h2:.2f} EUR/kg")
+    print(f"  Current H₂ price       : {price_H2[0]:.2f} EUR/kg")
+    print(f"  H₂ margin              : {price_H2[0] - breakeven_h2:+.2f} EUR/kg")
+
+print("="*55 + "\n")
 
 
 
@@ -692,7 +796,7 @@ for day, d in enumerate(results_all):
 
 # ---- RT stage revenues ----
 # Imbalance settlement
-rev_imbalance = -sum(
+rev_imbalance = sum(
     (results_all[day]["P_grid"][t] - results_all[day]["P_DA"][t])
     * imbalance_price[day * TIMESTEPS_PER_DAY + t] * dt / 1000
     for day in range(num_days)
@@ -1037,7 +1141,53 @@ print(f"  Mean P_buy in those slots : {P_buy_RT_full[buy_when_full].mean():,.0f}
 if buy_when_full.sum() > 50:
     print("  !! Buying grid power when storage is full — irrational, check P_buy cost term")
 
+##################################
+#NY###
+# === CORRECT REVENUE BREAKDOWN FOR STOCHASTIC RUN ===
 
+# 1. DA electricity revenue: P_DA committed, cleared at actual DA price
+rev_elec_DA = sum(
+    P_DA_full[t] * price_real[t] * dt / 1000   # ← price_real, not price_forecast
+    for t in range(len(P_DA_full))
+)
+
+# 2. Imbalance settlement: actual deviation at actual imbalance price
+rev_imbalance = sum(
+    (P_grid_full[t] - P_DA_full[t]) * imbalance_price[t] * dt / 1000
+    for t in range(len(P_grid_full))
+)
+
+# 3. RT hydrogen revenue: only real sales, from RT model
+rev_h2_RT = sum(
+    h_sell_RT_full[t] * price_H2[t] * dt
+    for t in range(len(h_sell_RT_full))
+)
+
+# 4. Grid purchase cost: from RT model
+cost_buy = sum(
+    P_buy_RT_full[t] * price_real[t] * dt / 1000
+    for t in range(len(P_buy_RT_full))
+)
+
+# 5. FCR revenue: committed in DA, earned regardless
+rev_FCR = sum(
+    DA_FCR_full[i] * price_FCR[i] * 4   # dt_FCR = 4 hours, not 16 timesteps
+    for i in range(len(DA_FCR_full))
+)
+
+# DA hydrogen revenue: DO NOT include — it is a scenario planning artifact
+# h_sell_DA is from the stochastic Stage 2, not a real physical transaction
+
+total = rev_elec_DA + rev_imbalance + rev_h2_RT - cost_buy + rev_FCR
+
+print("\n=== REALIZED REVENUE BREAKDOWN (Stochastic DA + RT) ===")
+print(f"  DA electricity revenue : {rev_elec_DA:,.0f} EUR")
+print(f"  Imbalance settlement   : {rev_imbalance:,.0f} EUR")
+print(f"  RT hydrogen revenue    : {rev_h2_RT:,.0f} EUR")
+print(f"  Grid purchase cost     : {-cost_buy:,.0f} EUR")
+print(f"  FCR revenue            : {rev_FCR:,.0f} EUR")
+print(f"  ─────────────────────────────────────")
+print(f"  TOTAL REALIZED         : {total:,.0f} EUR")
 
 # wind_fc = wind_forecast[:H]
 # wind_rt = wind_real[:H]
