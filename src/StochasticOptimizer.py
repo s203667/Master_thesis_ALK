@@ -280,11 +280,13 @@ class StochasticElectrolyzerModel:
         m.h2_prod = Constraint(m.SC, m.T, rule=h2_rule)
 
         T_last = d.T - 1
+        dt = 0.25
 
         def storage_rule(m, sc, t):
+
             if t == 0:
-                return m.storage[sc,t] == d.storage_initial + m.h[sc,t] - m.h_sell[sc,t]
-            return m.storage[sc,t] == m.storage[sc,t-1] + m.h[sc,t] - m.h_sell[sc,t]
+                return m.storage[sc,t] == d.storage_initial + (m.h[sc,t] - m.h_sell[sc,t]) * dt
+            return m.storage[sc,t] == m.storage[sc,t-1] + (m.h[sc,t] - m.h_sell[sc,t]) * dt
         m.storage_dyn = Constraint(m.SC, m.T, rule=storage_rule)
 
         def storage_bound_rule(m, sc, t):
@@ -293,8 +295,8 @@ class StochasticElectrolyzerModel:
 
         def h_sell_limit_rule(m, sc, t):
             if t == 0:
-                return m.h_sell[sc,t] <= m.h[sc,t] + d.storage_initial
-            return m.h_sell[sc,t] <= m.h[sc,t] + m.storage[sc,t-1]
+                return m.h_sell[sc,t]*dt <= m.h[sc,t]*dt + d.storage_initial
+            return m.h_sell[sc,t]*dt <= m.h[sc,t]*dt + m.storage[sc,t-1]
         m.h_sell_limit = Constraint(m.SC, m.T, rule=h_sell_limit_rule)
 
         def max_sell_rule(m, sc, t):
@@ -302,7 +304,7 @@ class StochasticElectrolyzerModel:
         m.max_sell = Constraint(m.SC, m.T, rule=max_sell_rule)
 
         def min_daily_h2_rule(m, sc):
-            return sum(m.h_sell[sc,t] for t in m.T) >= d.h_min_daily
+            return sum(m.h_sell[sc,t]*dt for t in m.T) >= d.h_min_daily
         m.min_daily_h2 = Constraint(m.SC, rule=min_daily_h2_rule)
 
         # --- FCR on-block (only participate when electrolyzer is on) ---
@@ -357,7 +359,7 @@ class StochasticElectrolyzerModel:
             expected_Q = sum(
                 m.prob[sc] * (
                     # (ii) DA export revenue at realized price
-                    sum(m.P_DA[t] * m.price_sc[sc,t] * dt / 1000
+                    sum(m.P_DA[t] * m.price_sc[sc,t] * dt
                         for t in m.T)
 
 
@@ -367,7 +369,7 @@ class StochasticElectrolyzerModel:
                     #       for t in m.T)
                     # Imbalance settlement — signed, matches RT formulation exactly
                     + sum(
-                        (m.P_grid[sc,t] - m.P_DA[t]) * m.imb_sc[sc,t] * dt / 1000
+                        (m.P_grid[sc,t] - m.P_DA[t]) * m.imb_sc[sc,t] * dt 
                         for t in m.T
                     )
 
@@ -375,7 +377,7 @@ class StochasticElectrolyzerModel:
                     + sum(m.h_sell[sc,t] * m.price_H2[t] * dt
                           for t in m.T)
                     # (v) Grid purchase cost
-                    - sum(m.P_buy[sc,t] * m.price_sc[sc,t] * dt / 1000
+                    - sum(m.P_buy[sc,t] * m.price_sc[sc,t] * dt 
                           for t in m.T)
                 )
                 for sc in m.SC

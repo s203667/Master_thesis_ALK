@@ -12,7 +12,8 @@ class Expando(object):
 class DataPreparationCSV:
     
     def __init__(self, start_date: str, end_date: str, el_price_file_name: str,
-                 wind_file_name: str, fcr_file_name: str, imbalance_file_name: str):
+                 wind_file_name: str, fcr_file_name: str, imbalance_file_name: str,
+                 wind_source: str = "scada", wtg_file_name: str = "V164-8MW.wtg"):
         
         self.wind_file_name = wind_file_name
         self.el_price_file_name = el_price_file_name
@@ -20,7 +21,9 @@ class DataPreparationCSV:
         self.imbalance_file_name = imbalance_file_name
         self.start_date = start_date
         self.end_date = end_date
-        
+        self.wind_source = wind_source
+        self.wtg_file_name = wtg_file_name
+    
         self.data = self.build()
     
     
@@ -29,62 +32,138 @@ class DataPreparationCSV:
         BASE_DIR = os.path.dirname(os.path.abspath(__file__))
         cache_dir = os.path.abspath(os.path.join(BASE_DIR, "..", "data", "cache"))
         os.makedirs(cache_dir, exist_ok=True)
-        cache_file = os.path.join(cache_dir, "wind_DK1_15min_scaled_210MW.csv")
 
-        # --- LOAD CACHE ---
+        # --- CACHE FILE NAME DEPENDS ON SOURCE ---
+        cache_file = os.path.join(
+            cache_dir,
+            f"wind_DK1_15min_scaled_210MW_{self.wind_source}.csv"
+        )
+
         if os.path.exists(cache_file):
-            print("Loading cached DK1 wind data...")
+            print(f"Loading cached wind data ({self.wind_source})...")
             df = pd.read_csv(cache_file, parse_dates=["time"], index_col="time")
             return df.loc[self.start_date:self.end_date]
 
-        print("Processing raw DK1 wind data...")
+        print(f"Processing raw wind data ({self.wind_source})...")
 
-        # --- LOAD RAW CSV ---
+        if self.wind_source == "scada":
+            df_15 = self._prepare_wind_scada()
+        elif self.wind_source == "era5":
+            df_15 = self._prepare_wind_era5()
+        else:
+            raise ValueError(f"Unknown wind_source '{self.wind_source}'. Use 'scada' or 'era5'.")
+
+        df_15.to_frame(name="wind_kW").to_csv(cache_file)
+        print(f"Wind cache saved ({self.wind_source}).")
+        return df_15.loc[self.start_date:self.end_date].to_frame(name="wind_kW")
+
+
+    def _prepare_wind_scada(self):
+        """Load and scale Energinet 5-min SCADA offshore wind data to 210 MW farm."""
         df = load_csv_data(self.wind_file_name, sep=';', decimal=',')
-
-        # --- PARSE TIMESTAMP ---
         df["time"] = pd.to_datetime(df["Minutes5DK"])
         df.set_index("time", inplace=True)
         df.sort_index(inplace=True)
 
-        # --- RAW OFFSHORE PRODUCTION (MW) ---
-        df["wind_MW"] = df["OffshoreWindPower"]
-        
+        DK1_capacity  = 1600.8   # MW — total DK1 offshore installed
+        farm_capacity = 210.0    # MW — reference farm
+        scale_factor  = farm_capacity / DK1_capacity
 
-        # --- SCALE TO 210 MW FARM ---
-        DK1_capacity = 1600.8   # MW
-        farm_capacity = 210.0   # MW
-        scale_factor = farm_capacity / DK1_capacity
+        df["wind_kW"] = df["OffshoreWindPower"] * scale_factor * 1000.0
 
-        df["wind_kW"] = df["wind_MW"] * scale_factor * 1000.0
-
-        # --- RESAMPLE 5-min → 15-min BY AVERAGING ---
         df_15 = df["wind_kW"].resample("15min").mean()
+        df_15 = df_15.clip(lower=0.0)
+        df_15 = df_15.interpolate(limit=1, limit_direction='both')
+        df_15 = df_15.ffill().bfill()
+        return df_15
 
-        # --- CLEAN INVALID WIND DATA ---
-        invalid_negatives = (df_15 < 0).sum()
-        missing_values = df_15.isna().sum()
-        if invalid_negatives or missing_values:
-            print(f"Cleaning wind data: {invalid_negatives} negative values and {missing_values} missing values found.")
 
-        # Wind power cannot be negative
+    def _prepare_wind_era5(self):
+        """Load ERA5 hourly wind speeds, apply V164-8MW power curve, upsample to 15-min."""
+        import xml.etree.ElementTree as ET
+        from scipy.interpolate import interp1d
+
+        BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+        data_dir  = os.path.abspath(os.path.join(BASE_DIR, "..", "data"))
+
+        # --- 1. Parse power curve from WAsP file ---
+        wtg_path = os.path.join(BASE_DIR, "..", "data", "Vestas_V164-8MW.wtg")  
+        tree = ET.parse(wtg_path)
+        root = tree.getroot()
+
+        sss      = root.find('.//StartStopStrategy')
+        v_cutin  = float(sss.get('LowSpeedCutIn'))
+        v_cutout = float(sss.get('HighSpeedCutOut'))
+
+        records = []
+        for dp in root.findall('.//DataPoint'):
+            ws  = float(dp.get('WindSpeed'))
+            pwr = float(dp.get('PowerOutput')) / 1000.0   # W → kW
+            records.append((ws, pwr))
+
+        df_pc = pd.DataFrame(records, columns=['ws', 'pwr'])
+        df_pc = df_pc.sort_values('ws').reset_index(drop=True)
+
+        # Add zeros outside operating range
+        df_pc = pd.concat([
+            pd.DataFrame({'ws': [0.0, v_cutin - 0.01], 'pwr': [0.0, 0.0]}),
+            df_pc,
+    pd.DataFrame({'ws': [v_cutout + 0.01], 'pwr': [0.0]})
+        ], ignore_index=True).sort_values('ws').reset_index(drop=True)
+
+        pc_interp = interp1d(
+            df_pc['ws'], df_pc['pwr'],
+            kind='linear', bounds_error=False, fill_value=0.0
+        )
+
+        rated_kw      = df_pc['pwr'].max()              # 8000 kW
+        farm_capacity = 210_000.0                        # kW
+        n_turbines    = farm_capacity / rated_kw         # 26.25
+
+        print(f"  Power curve: V164-8MW, rated {rated_kw:.0f} kW, "
+            f"{n_turbines:.2f} turbines → {farm_capacity/1000:.0f} MW farm")
+
+        # --- 2. Load ERA5 wind speed CSV ---
+        ws_path = os.path.join(BASE_DIR, "..", "data", "windspeeds.csv")
+
+        # Skip metadata rows at top — find the row starting with 'time'
+        with open(ws_path, 'r') as f:
+            lines = f.readlines()
+        header_row = next(i for i, l in enumerate(lines) if l.startswith('time'))
+
+        df_era5 = pd.read_csv(ws_path, skiprows=header_row, parse_dates=['time'])
+        df_era5.columns = ['time', 'wind_speed_ms']
+        df_era5.set_index('time', inplace=True)
+
+        # UTC → Danish local time (strip tz for clean merging)
+        df_era5.index = (
+            df_era5.index
+            .tz_localize('UTC')
+            .tz_convert('Europe/Copenhagen')
+            .tz_localize(None)
+        )
+        df_era5.sort_index(inplace=True)
+
+        # --- 3. Hub height correction: 100m → 103.6m (log law, z0=0.0002 m sea) ---
+        Z_ERA5, Z_HUB, Z0 = 100.0, 103.6, 0.0002
+        correction = np.log(Z_HUB / Z0) / np.log(Z_ERA5 / Z0)
+        df_era5['wind_speed_hub'] = df_era5['wind_speed_ms'] * correction
+
+        # --- 4. Apply power curve and scale to farm ---
+        df_era5['wind_kW'] = pc_interp(df_era5['wind_speed_hub'].values) * n_turbines
+        df_era5['wind_kW'] = df_era5['wind_kW'].clip(lower=0.0)
+
+        # --- 5. Remove duplicate timestamps (can occur from timezone handling) ---
+        df_era5 = df_era5[~df_era5.index.duplicated(keep='first')]
+
+        # --- 6. Upsample hourly → 15-min by linear interpolation ---
+        df_15 = df_era5['wind_kW'].resample('15min').interpolate(method='linear')
         df_15 = df_15.clip(lower=0.0)
 
-        # For gaps <= 1.5 hours (6 * 15-min intervals), fill with last known value
-        df_15 = df_15.fillna(method='ffill', limit=6).fillna(method='bfill', limit=6)
+        cf = df_era5['wind_kW'].mean() / farm_capacity * 100
+        print(f"  ERA5 capacity factor: {cf:.1f}%")
 
-        # For longer gaps, interpolate linearly between known values
-        df_15 = df_15.interpolate(method='linear')
-
-        # If any NaNs remain (e.g., at edges), fill with constant
-        df_15 = df_15.fillna(method='ffill').fillna(method='bfill')
-
-        # --- SAVE CACHE ---
-        df_15.to_frame(name="wind_kW").to_csv(cache_file)
-        print("Wind cache saved.")
-
-        return df_15.loc[self.start_date:self.end_date].to_frame(name="wind_kW")
-
+        return df_15
     def prepare_el_price_data(self):
         #cache
         BASE_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -129,6 +208,7 @@ class DataPreparationCSV:
         df_el_price = pd.concat(combined).sort_index()
         df_el_price = df_el_price[~df_el_price.index.duplicated(keep='last')]
         df_el_price = df_el_price.fillna(method='ffill').fillna(method='bfill')
+        
 
         # --- SAVE CACHE --- #
         df_el_price.to_csv(cache_file)
@@ -176,8 +256,7 @@ class DataPreparationCSV:
             "FCRdk_EUR": "price_FCR"
         })
 
-        # Calculate mean FCR price
-        
+    
         # 🔹 --- RESAMPLE DIRECTLY TO 4 HOURS --- #
         df_fcr_4h = df_fcr.resample("4H").mean()
         df_fcr_4h["price_FCR"] = df_fcr_4h["price_FCR"] / 1000  # Convert from EUR/MW to EUR/kW

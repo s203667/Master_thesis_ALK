@@ -1,0 +1,57 @@
+<WindTurbineGenerator FormatVersion="1.02" LowestCompatibleFormatVersion="1.01" Description="Vestas V164-8MW" ManufacturerName="" ReferenceURI="" RotorDiameter="164" ControlSystem="Undefined">
+  <Comments>
+  </Comments>
+  <SuggestedHeights>
+    <Height>103.6</Height>
+  </SuggestedHeights>
+  <PerformanceTable AirDensity="1.225" MaximumNoiseLevel="0" BladePitchAngle="-99999" DataStatus="Unknown" DataSource="" ReferenceURI="None" StationaryThrustCoEfficient="0.045">
+    <StartStopStrategy LowSpeedCutOut="4" LowSpeedCutIn="4" HighSpeedCutOut="25" HighSpeedCutIn="25" />
+    <Comments>
+    </Comments>
+    <DataTable>
+      <DataPoint WindSpeed="4" PowerOutput="100000" ThrustCoEfficient="0.899" />
+      <DataPoint WindSpeed="4.5" PowerOutput="330000" ThrustCoEfficient="0.864" />
+      <DataPoint WindSpeed="5" PowerOutput="550000" ThrustCoEfficient="0.836" />
+      <DataPoint WindSpeed="5.5" PowerOutput="840000" ThrustCoEfficient="0.822" />
+      <DataPoint WindSpeed="6" PowerOutput="1100000" ThrustCoEfficient="0.817" />
+      <DataPoint WindSpeed="6.5" PowerOutput="1500000" ThrustCoEfficient="0.813" />
+      <DataPoint WindSpeed="7" PowerOutput="1900000" ThrustCoEfficient="0.809" />
+      <DataPoint WindSpeed="7.5" PowerOutput="2400000" ThrustCoEfficient="0.804" />
+      <DataPoint WindSpeed="8" PowerOutput="2916000" ThrustCoEfficient="0.8" />
+      <DataPoint WindSpeed="8.5" PowerOutput="3500000" ThrustCoEfficient="0.795" />
+      <DataPoint WindSpeed="9" PowerOutput="4200000" ThrustCoEfficient="0.788" />
+      <DataPoint WindSpeed="9.5" PowerOutput="4900000" ThrustCoEfficient="0.764" />
+      <DataPoint WindSpeed="10" PowerOutput="5600000" ThrustCoEfficient="0.714" />
+      <DataPoint WindSpeed="10.5" PowerOutput="6400000" ThrustCoEfficient="0.636" />
+      <DataPoint WindSpeed="11" PowerOutput="7200000" ThrustCoEfficient="0.549" />
+      <DataPoint WindSpeed="11.5" PowerOutput="7650000" ThrustCoEfficient="0.463" />
+      <DataPoint WindSpeed="12" PowerOutput="7900000" ThrustCoEfficient="0.396" />
+      <DataPoint WindSpeed="12.5" PowerOutput="7985000" ThrustCoEfficient="0.343" />
+      <DataPoint WindSpeed="13" PowerOutput="8000000" ThrustCoEfficient="0.3" />
+      <DataPoint WindSpeed="13.5" PowerOutput="8000000" ThrustCoEfficient="0.265" />
+      <DataPoint WindSpeed="14" PowerOutput="8000000" ThrustCoEfficient="0.236" />
+      <DataPoint WindSpeed="14.5" PowerOutput="8000000" ThrustCoEfficient="0.211" />
+      <DataPoint WindSpeed="15" PowerOutput="8000000" ThrustCoEfficient="0.19" />
+      <DataPoint WindSpeed="15.5" PowerOutput="8000000" ThrustCoEfficient="0.172" />
+      <DataPoint WindSpeed="16" PowerOutput="8000000" ThrustCoEfficient="0.156" />
+      <DataPoint WindSpeed="16.5" PowerOutput="8000000" ThrustCoEfficient="0.142" />
+      <DataPoint WindSpeed="17" PowerOutput="8000000" ThrustCoEfficient="0.13" />
+      <DataPoint WindSpeed="17.5" PowerOutput="8000000" ThrustCoEfficient="0.12" />
+      <DataPoint WindSpeed="18" PowerOutput="8000000" ThrustCoEfficient="0.11" />
+      <DataPoint WindSpeed="18.5" PowerOutput="8000000" ThrustCoEfficient="0.102" />
+      <DataPoint WindSpeed="19" PowerOutput="8000000" ThrustCoEfficient="0.095" />
+      <DataPoint WindSpeed="19.5" PowerOutput="8000000" ThrustCoEfficient="0.088" />
+      <DataPoint WindSpeed="20" PowerOutput="8000000" ThrustCoEfficient="0.082" />
+      <DataPoint WindSpeed="20.5" PowerOutput="8000000" ThrustCoEfficient="0.076" />
+      <DataPoint WindSpeed="21" PowerOutput="8000000" ThrustCoEfficient="0.071" />
+      <DataPoint WindSpeed="21.5" PowerOutput="8000000" ThrustCoEfficient="0.067" />
+      <DataPoint WindSpeed="22" PowerOutput="8000000" ThrustCoEfficient="0.063" />
+      <DataPoint WindSpeed="22.5" PowerOutput="8000000" ThrustCoEfficient="0.059" />
+      <DataPoint WindSpeed="23" PowerOutput="8000000" ThrustCoEfficient="0.056" />
+      <DataPoint WindSpeed="23.5" PowerOutput="8000000" ThrustCoEfficient="0.053" />
+      <DataPoint WindSpeed="24" PowerOutput="8000000" ThrustCoEfficient="0.05" />
+      <DataPoint WindSpeed="24.5" PowerOutput="8000000" ThrustCoEfficient="0.047" />
+      <DataPoint WindSpeed="25" PowerOutput="8000000" ThrustCoEfficient="0.045" />
+    </DataTable>
+  </PerformanceTable>
+</WindTurbineGenerator>

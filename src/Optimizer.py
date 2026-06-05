@@ -227,7 +227,6 @@ class ElectrolyzerModel:
         #Hydrogen production
         #OVERFØRT
         def h2_rule(m, t):
-            dt = 0.25
             return m.h[t] == sum(d.A_s[s] * m.P_seg[t, s] + d.B_s[s] * m.z_seg[t, s] for s in m.S)
         m.h2_prod = Constraint(m.T, rule=h2_rule)
 
@@ -258,10 +257,11 @@ class ElectrolyzerModel:
 
         # Storage dynamics 
         T_last = d.T - 1
+        dt = 0.25
         def storage_rule(m, t):
             if t == 0:
-                return m.storage[t] == m.storage[T_last]+ m.h[t] - m.h_sell[t] #Consider this
-            return m.storage[t] == m.storage[t-1] + m.h[t] - m.h_sell[t]
+                return m.storage[t] == m.storage[T_last]+ (m.h[t] - m.h_sell[t]) * dt  # Consider this
+            return m.storage[t] == m.storage[t-1] + (m.h[t] - m.h_sell[t]) * dt
         m.storage_dyn = Constraint(m.T, rule=storage_rule)
 
         # Storage bounds 
@@ -270,15 +270,16 @@ class ElectrolyzerModel:
         m.storage_bound = Constraint(m.T, rule=storage_bound_rule)
 
         def h_sell_prod_limit(m, t): 
+            dt = 0.25
             if t == 0:
-                return m.h_sell[t] <= m.h[t] + m.storage[T_last]
-            return m.h_sell[t] <= m.h[t] + m.storage[t-1]  # Can only sell what is produced plus what's in storage
+                return m.h_sell[t]*dt <= m.h[t]*dt + m.storage[T_last]
+            return m.h_sell[t]*dt <= m.h[t]*dt + m.storage[t-1]  # Can only sell what is produced plus what's in storage
         m.h_sell_prod_limit = Constraint(m.T, rule=h_sell_prod_limit)
 
 
         # Minimum daily hydrogen delivery (makes storage worth using as a buffer)
         def min_daily_h2(m):
-            return sum(m.h_sell[t] for t in m.T) >= d.h_min_daily
+            return sum(m.h_sell[t]*dt for t in m.T) >= d.h_min_daily
         m.min_daily_delivery = Constraint(rule=min_daily_h2)
 
         # Maximum sell rate per timestep (physical pipeline/truck limit)
@@ -362,6 +363,7 @@ class ElectrolyzerModel:
 
         if d.is_DA:
             #OVERFØRT
+            #Stoch
             def fcr_min_rule(m, i):
                 return m.r_FCR_block[i] >= d.P_min_bid * m.z_FCR[i]
             m.fcr_min = Constraint(m.I, rule=fcr_min_rule)
