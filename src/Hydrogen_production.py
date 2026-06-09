@@ -35,7 +35,7 @@ def simple_h2_prod(eff_kWh_per_Nm3=3.86):
 def electrolyzer_UI_curve(
         I_range,
         T=80.0,          # °C
-        p=1.0,           # bar (or same units as in fitted d2)
+        p=60.0,           # bar (or same units as in fitted d2)
         A=0.0625,          # m^2
         r1 = 4.45153E-05,#Changed fron andrea Gloppen. Based on Hysata 290 mOhm/cm2 at 25 °C, but no reason for the scale yet. 
         r2 = 1*6.88874E-09,
@@ -160,6 +160,7 @@ def U_tn(T, p, W_t=0.30, w_z=0.0):
 
     #Thermoneutral voltage:
     U_tn_eq = U_HHV + (phi / (z*F))*Y #2.10
+    
 
     return U_tn_eq, U_HHV
 
@@ -175,6 +176,7 @@ def Eff_models(T, j, p, U_cell):
 
     # Voltage efficiency: thermoneutral / actual cell voltage
     U_tn_eq, U_HHV = U_tn(T, p, W_t=0.30, w_z=0.0)  # scalar
+    
     eta_v = U_tn_eq / U_cell                 # array over j
 
     eta_tot = eta_f * eta_v
@@ -193,8 +195,31 @@ def H2_rate(T, p, j, A_cell, N_cell, eta_f):
     m_dot = eta_f * N_cell * I_cell/(z * F) * m_H2 * 3600.0 # Convert from kg/s to kg/h
 
     return m_dot
+def thermal_model(U_cell, U_tn_eq, I_range, N_cell, N_stacks,
+                          T_op=80.0, T_amb=20.0, R_t=0.167):
 
-def electrolyzer_h2_prod_curve(T, I_range, A_cell, p, p_out, N_stacks, N_cell):
+    # Heat generated: excess electrical energy above thermoneutral
+    Q_prod = N_cell * (U_cell - U_tn_eq) * I_range  # W
+    Q_prod = np.maximum(Q_prod, 0)
+
+    # Heat lost to ambient: passive loss through insulation/casing
+    # This is a constant at fixed T_op and T_amb
+    Q_loss_total = (T_op - T_amb) / R_t  # W, scalar
+    Q_loss = np.full_like(Q_prod, Q_loss_total)  # same at all loads
+
+    # Active cooling required: what remains after passive losses
+    Q_cool = Q_prod - Q_loss
+    Q_cool = np.maximum(Q_cool, 0)  # no active cooling needed if loss > prod
+
+    #In kW
+    Q_prod = Q_prod / 1000
+    Q_loss = Q_loss / 1000
+    Q_cool = Q_cool / 1000
+
+    return Q_prod , Q_loss , Q_cool 
+
+def electrolyzer_h2_prod_curve(T, I_range, A_cell, p, p_out, N_stacks, N_cell,
+                               T_amb = 20.0, R_t = 0.1):
     j = I_range / A_cell
     _, _, U_cell = electrolyzer_UI_curve(I_range, T=T, p=p, A=A_cell, plot=False)
     _, _, eta_f = Eff_models(T, j, p, U_cell)
@@ -202,8 +227,8 @@ def electrolyzer_h2_prod_curve(T, I_range, A_cell, p, p_out, N_stacks, N_cell):
 
     P_stack = N_stacks * N_cell * U_cell * I_range / 1000  # kW
     P_comp = compressor_power(T, p, p_out) * m_dot
-    P_total = P_stack + P_comp
-
+    #P_cooling = thermal_model(U_cell, U_HHV, I_range, N_cell, N_stacks, T_op=T, T_amb = T_amb, R_t = R_t)  # kW
+    P_total = P_stack + P_comp #+ P_cooling
 
     return P_total, m_dot, P_stack
 
@@ -226,19 +251,24 @@ if __name__ == "__main__":
     A_cell = 0.0625
     T_static = 80
     p = 60
-    p_out = 250
+    p_out = 90
     N_cell = 250
     N_stacks = 35
- 
+    T_amb = 20
+    R_t = 0.1
     #I_range = np.linspace(5, 5500, 50)  # Current range from 5 to 300 A
     j_mA_cm2 = np.linspace(1, 400, 50)
     j = j_mA_cm2 * 10          # A/m²
     I_range = j * A_cell       # A
-    j, j_plot, U_cell = electrolyzer_UI_curve(I_range)
+    j, j_plot, U_cell = electrolyzer_UI_curve(I_range, T=T_static, p=p, A=A_cell)
 
     Nm3_to_kg = 0.0899                  # conversion factor
     M_H2 = 2.0158e-3 # kg/mol
     U_tn_eq, U_HHV = U_tn(T_static, p, W_t=0.30, w_z=0.0)
+
+    #Get cooling factors
+    Q_prod, Q_loss, Q_cool = thermal_model(U_cell, U_tn_eq, I_range, N_cell, N_stacks,
+                                            T_op=T_static, T_amb = T_amb, R_t=R_t)
 
     # operating range
     #I_range = np.linspace(5, 5500, 50)  # A
@@ -264,8 +294,8 @@ if __name__ == "__main__":
 
 
     P_total, m_dot, P_stack = electrolyzer_h2_prod_curve(
-    T_static, I_range, A_cell, p, p_out, N_stacks, N_cell
-    )   
+    T_static, I_range, A_cell, p, p_out, N_stacks, N_cell, T_amb, R_t)
+
 
     # P_target = 4000 # Target power for scaling
     # P_max_current = np.max(P_total)
@@ -278,11 +308,18 @@ if __name__ == "__main__":
     #m_dot = N_stacks_scaled * H2_rate(T_static, p, j, A_cell, N_cell, eta_f)
     #P = N_stacks_scaled * N_cell * P_1cell
 
+    # Derive HHV_kWh_per_kg from U_tn_eq for full consistency
+    z = 2
+    F_const = 96485
+    M_H2 = 2.0158e-3
+    HHV_kWh_per_kg = U_tn_eq * z * F_const / (M_H2 * 3.6e6)  # kWh/kg
 
-    eta_kg_per_MWh = (m_dot / P_total) * 1000
-    HHV_kWh_per_kg = 39.4
-    eta_p = m_dot * HHV_kWh_per_kg / P_total
-    #eta_HHV = eta_f*(3600*M_H2*U_HHV)/(z*F*U_cell)
+    
+    eta_p = m_dot * HHV_kWh_per_kg / P_stack  
+
+    # kg/MWh metric
+    eta_kg_per_MWh = (m_dot / P_total) * 1000 
+
 
     # 🔹 Linear fit analysis
     coeffs = np.polyfit(P_total, m_dot, 1)  # Linear fit: y = slope*x + intercept
@@ -305,7 +342,7 @@ if __name__ == "__main__":
     ax1_1.set_xlabel('Power input [kW]')
     ax1_1.set_ylabel('Hydrogen production [kg/h]', color=color1)
     ax1_1.plot(P_total, m_dot, 'o-', color=color1, markersize=4, label='Electrolyzer model')
-    ax1_1.plot(P_total, m_dot_fit, '--r', linewidth=2, label=f'Linear fit (R² = {r_squared:.6f})')
+    ax1_1.plot(P_total, m_dot_fit, '--r', linewidth=2, label=f'Linear fit' )
     ax1_1.tick_params(axis='y', labelcolor=color1)
     ax1_1.grid(True)
     
@@ -313,7 +350,7 @@ if __name__ == "__main__":
     ax1_2 = ax1_1.twinx()
     color2 = 'tab:orange'
     ax1_2.set_ylabel('Total efficiency [-]', color=color2)
-    ax1_2.plot(P_total, eta_tot, 's-', color=color2, markersize=4, label='Total efficiency')
+    ax1_2.plot(P_total, eta_p, 's-', color=color2, markersize=4, label='Total efficiency')
     ax1_2.tick_params(axis='y', labelcolor=color2)
     
     # Title and combined legend
@@ -352,7 +389,7 @@ if __name__ == "__main__":
 
     plt.show()
 
-    plt.figure()
+    # plt.figure()
     plt.plot(P_total, eta_kg_per_MWh, 'o-')
     plt.xlabel("Power input [kW]")
     plt.ylabel("Efficiency [kg/MWh]")
@@ -393,7 +430,6 @@ if __name__ == "__main__":
 
     # constants
     Nm3_to_kg = 0.0899
-    HHV_kWh_per_kg = 39.4
 
     # --- evaluation points ---
     load = np.array([0.25, 0.5, 0.75, 1.0])
