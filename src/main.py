@@ -10,7 +10,7 @@ import matplotlib.gridspec as gridspec
 from matplotlib.colors import TwoSlopeNorm
 
 
-USE_STOCHASTIC = False
+USE_STOCHASTIC = True
 N_SCENARIOS    = 20
 N_NEIGHBORS    = 50
 
@@ -151,7 +151,7 @@ z_on_state = 0
 P_prev = 0
 
 TIMESTEPS_PER_DAY = 96
-num_days =  20#len(wind_real) // TIMESTEPS_PER_DAY
+num_days =  5#len(wind_real) // TIMESTEPS_PER_DAY
 
 blocks_per_day = TIMESTEPS_PER_DAY // 16
 
