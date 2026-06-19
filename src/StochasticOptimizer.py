@@ -21,7 +21,7 @@ class StochasticInputData:
                  storage_max, storage_initial,
                  h_min_daily, h_sell_max, grid_cap,
                  N_down, FCR_volume,
-                 z_on_prev=0, P_prev=0):
+                 z_on_prev=0, z_off_prev = 0, P_prev=0):
 
         self.T = T
         self.S_seg = S_seg
@@ -55,6 +55,7 @@ class StochasticInputData:
         self.P_max_bid       = FCR_volume
 
         self.z_on_prev = z_on_prev
+        self.z_off_prev = z_off_prev
         self.P_prev    = P_prev
 
 
@@ -188,6 +189,13 @@ class StochasticElectrolyzerModel:
                 for k in range(t, min(t + d.N_down, d.T))
             ) >= d.N_down * m.y_shutdown[sc, t]
         m.downtime = Constraint(m.SC, m.T, rule=downtime_rule)
+
+        def no_off_to_sb_rule(m, sc, t):
+            if t == 0:
+                return m.z_sb[sc, 0] <= 1 - d.z_off_prev
+            return m.z_sb[sc, t] + m.z_off[sc, t-1] <= 1
+        m.no_off_to_sb = Constraint(m.SC, m.T, rule=no_off_to_sb_rule)
+
 
         # --- Piecewise bounds ---
         def seg_min_rule(m, sc, t, s):
@@ -405,7 +413,7 @@ class StochasticElectrolyzerModel:
 
         # def no_curt_if_buy_rule(m, sc, t):
         #     return m.P_curt[sc,t] <= M * (1 - m.buy_or_curt[sc,t])
-        # m.no_curt_if_buy = Constraint(m.SC, m.T, rule=no_curt_if_buy_rule)
+        #m.no_curt_if_buy = Constraint(m.SC, m.T, rule=no_curt_if_buy_rule)
 
         #Curtailment will be 0 in all scenarios if P_DA is negative:
 
@@ -413,11 +421,11 @@ class StochasticElectrolyzerModel:
 
         def no_import_if_curt(m, sc, t):
             return m.P_DA[t] >= -M * m.import_flag[sc, t]
-        #m.no_import_if_curt = Constraint(m.SC, m.T, rule=no_import_if_curt)
+        m.no_import_if_curt = Constraint(m.SC, m.T, rule=no_import_if_curt)
 
         def no_curt_if_import(m, sc, t):
             return m.P_curt[sc, t] <= M * (1 - m.import_flag[sc, t])
-        #m.no_curt_if_import = Constraint(m.SC, m.T, rule=no_curt_if_import)
+        m.no_curt_if_import = Constraint(m.SC, m.T, rule=no_curt_if_import)
 
         # m.binary = Var(m.SC, m.T, domain = Binary)
         # #No buy if export

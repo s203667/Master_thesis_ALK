@@ -14,10 +14,6 @@ import os
 os.makedirs("results", exist_ok=True)
 import pickle
 
-#import matplotlib.gridspec as gridspec
-#from matplotlib.colors import TwoSlopeNorm
-
-
 
 
 USE_STOCHASTIC = False
@@ -42,8 +38,8 @@ from StochasticOptimizer import StochasticInputData, StochasticElectrolyzerModel
 
 # --- Use ERA5 + power curve instead ---
 prep = DataPreparationCSV(
-    start_date="2025-10-07",
-    end_date="2025-12-30",
+    start_date="2025-04-01",
+    end_date="2026-03-05",
     el_price_file_name="DayAheadPrices.csv",
     wind_file_name="windspeeds.csv",   # ← ERA5 file
     fcr_file_name="FcrDK1.csv",
@@ -162,11 +158,12 @@ N_down = 6             # Downtime in 15min intervals, adjust as needed
 t0 = 0
 
 storage_state = storage_initial
-z_on_state = 0
+z_on_state = 1 
+z_off_state = 0 
 P_prev = 0
 
 TIMESTEPS_PER_DAY = 96
-num_days =  30#len(wind_real) // TIMESTEPS_PER_DAY
+num_days =  14#len(wind_real) // TIMESTEPS_PER_DAY
 
 blocks_per_day = TIMESTEPS_PER_DAY // 16
 
@@ -227,7 +224,7 @@ for day in range(num_days):
             h_min_daily=h_min_daily, h_sell_max=h_sell_max,
             grid_cap=grid_cap, N_down=N_down,
             FCR_volume=FCR_volume_day,
-            z_on_prev=z_on_state, P_prev=P_prev
+            z_on_prev=z_on_state, z_off_prev = z_off_state, P_prev=P_prev
         )
         DA_model = StochasticElectrolyzerModel(input_DA)
     else:
@@ -257,6 +254,7 @@ for day in range(num_days):
             N_down=N_down,
             FCR_volume=FCR_volume_day,
             z_on_prev=z_on_state,
+            z_off_prev = z_off_state,
             P_prev=P_prev,
             is_DA=True,
             DA_export=None  # Not used in DA model
@@ -454,6 +452,7 @@ for day in range(num_days):
         N_down=N_down,
         FCR_volume=FCR_volume_day,
         z_on_prev=z_on_state,
+        z_off_prev = z_off_state,
         P_prev=P_prev,
         is_DA=False,
         DA_export=P_DA             # fixed DA bid
@@ -480,6 +479,7 @@ for day in range(num_days):
     #Update states for next day
     storage_state = RT_model.results.storage[-1]
     z_on_state = RT_model.results.z_on[-1]
+    z_off_state = RT_model.results.z_off[-1]
     P_prev = RT_model.results.P_elec[-1]
 
     print(f"\nDAY {day+1}")
@@ -524,6 +524,7 @@ for day in range(num_days):
         "wind_forecast": wind_fc_day,
         "price_imb":   imbalance_day,       # EUR/MWh
         "price_DA":    price_rt_day,        # EUR/MWh
+        "price_DA_fc": price_fc_day,
         "price_H2":    price_H2_RT,         # EUR/kg
         "price_FCR":   price_FCR_day ,       #EUR/kW
     })
@@ -747,7 +748,9 @@ def plot_imbalance_deep_dive(results_all, label, n_days=3, start_day=0):
     P_grid    = np.concatenate([d["P_grid"]    for d in days])
     P_elec_DA = np.concatenate([d["P_elec_DA"] for d in days])
     P_elec_RT = np.concatenate([d["P_elec_RT"] for d in days])
+    wind_fc       = np.concatenate([d["wind_forecast"]   for d in days]) 
     #P_buy     = np.concatenate([d["P_buy_RT"]  for d in days])
+    p_DA_fc = np.concatenate([d["price_DA_fc"] for d in days])
     wind      = np.concatenate([d["wind_real"] for d in days])
     p_DA      = np.concatenate([d["price_DA"]  for d in days])
     p_imb     = np.concatenate([d["price_imb"] for d in days])
@@ -766,6 +769,8 @@ def plot_imbalance_deep_dive(results_all, label, n_days=3, start_day=0):
     # ── Panel 1: power flows + P_buy ─────────────────────────────────────
     ax = axes[0]
     ax.fill_between(t, 0, wind/1000, alpha=0.2, color="steelblue", label="Wind (real)")
+    ax.plot(t, wind_fc/1000, color="steelblue", lw=1.0, ls=":",
+            alpha=0.7, label="Wind (forecast)")
     ax.plot(t, P_DA/1000,   color="navy",      lw=1.5, ls="--", label="P_DA committed")
     ax.plot(t, P_grid/1000, color="royalblue", lw=1.2,          label="P_grid realised")
     #ax.plot(t, P_buy/1000,  color="crimson",   lw=1.2, ls=":",  label="P_buy (grid import)")
@@ -776,7 +781,7 @@ def plot_imbalance_deep_dive(results_all, label, n_days=3, start_day=0):
 
     # ── Panel 2: electrolyzer ─────────────────────────────────────────────
     ax = axes[1]
-    ax.plot(t, P_elec_DA/1000, color="darkorange", lw=1.5, ls="--", label="Elec DA commitment")
+    ax.plot(t, P_elec_DA/1000, color="darkorange", lw=1.5, ls="--", label="Elec DA schedule")
     ax.plot(t, P_elec_RT/1000, color="orangered",  lw=1.2,          label="Elec RT realised")
     ax.set_ylabel("MW")
     ax.set_title("Electrolyzer: DA commitment vs RT realisation")
@@ -820,6 +825,13 @@ def plot_imbalance_deep_dive(results_all, label, n_days=3, start_day=0):
     ax.fill_between(t, 0, p_imb,
                     where=(p_imb < 0), alpha=0.15, color="purple",
                     label="Negative imb price (curtailment pressure)")
+    eff_mean  = float(np.mean(A_s))   # kg/kWh — pass into function or compute here
+    p_H2_val  = float(p_DA.mean() * 0 + 4.5)  # or pass p_H2 as a parameter
+
+    lambda_be = eff_mean * p_H2_val * 1000    # EUR/MWh
+
+    ax.axhline(lambda_be, color="darkorange", lw=1.5, ls="--",
+            label=f"H₂ break-even λ ({lambda_be:.0f} EUR/MWh)")
     ax.set_ylabel("EUR/MWh")
     ax.set_xlabel("Hour of window")
     ax.set_title("Prices: DA vs imbalance  "

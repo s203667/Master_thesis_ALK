@@ -14,7 +14,7 @@ class InputData:
                  P_seg_min, P_seg_max,
                  A_s, B_s,
                  storage_max, storage_initial, h_min_daily, h_sell_max, grid_cap,
-                 N_down, FCR_volume, z_on_prev=0, P_prev=0, is_DA = False, DA_export = None):
+                 N_down, FCR_volume, z_on_prev=0, z_off_prev=0, P_prev=0, is_DA = False, DA_export = None):
 
         self.T = T              # time steps
         self.S = S              # segments
@@ -50,6 +50,7 @@ class InputData:
 
 
         self.z_on_prev = z_on_prev
+        self.z_off_prev = z_off_prev
         self.P_prev = P_prev
 
         self.is_DA = is_DA  # DA or real-time
@@ -105,9 +106,9 @@ class ElectrolyzerModel:
 
         #m.P_buy = Var(m.T, domain=NonNegativeReals)
         if d.is_DA:
-            m.P_DA = Var(m.T, bounds=(0, None))
+            m.P_DA = Var(m.T, bounds=(-d.P_max, None))
         else:
-            m.P_grid = Var(m.T, bounds=(0, None))
+            m.P_grid = Var(m.T, bounds=(-d.P_max, None))
         m.dev = Var(m.T, domain=NonNegativeReals)
 
         m.deficit = Var(m.T, domain=NonNegativeReals)
@@ -255,6 +256,13 @@ class ElectrolyzerModel:
             ) >= d.N_down * m.y_shutdown[t]
         m.downtime = Constraint(m.T, rule=downtime_rule)
 
+        def no_off_to_sb_rule(m, t):
+            if t == 0:
+                return m.z_sb[0] <= 1 - d.z_off_prev  # day boundary
+            return m.z_sb[t] + m.z_off[t-1] <= 1
+        m.no_off_to_sb = Constraint(m.T, rule=no_off_to_sb_rule)
+
+
         # Storage dynamics 
         T_last = d.T - 1
         dt = 0.25
@@ -330,12 +338,12 @@ class ElectrolyzerModel:
             def no_import_if_curt(m, t):
                 # P_DA >= -M * import_flag  →  if flag=0, P_DA >= 0
                 return m.P_DA[t] >= -M * m.import_flag[t]
-            #m.no_import_if_curt = Constraint(m.T, rule=no_import_if_curt)
+            m.no_import_if_curt = Constraint(m.T, rule=no_import_if_curt)
 
             def no_curt_if_import(m, t):
                 # P_curt <= M * (1 - import_flag)  →  if flag=1, P_curt = 0
                 return m.P_curt[t] <= M * (1 - m.import_flag[t])
-            #m.no_curt_if_import = Constraint(m.T, rule=no_curt_if_import)
+            m.no_curt_if_import = Constraint(m.T, rule=no_curt_if_import)
 
         if not d.is_DA:
             # Binary: 1 = P_DA is non-negative (exporting), 0 = P_DA may be negative (importing)
@@ -346,24 +354,18 @@ class ElectrolyzerModel:
             # If import_flag = 1 → P_curt = 0 (no curtailment allowed)
             def no_grid_import_if_curt(m, t):
                 # P_DA >= -M * import_flag  →  if flag=0, P_DA >= 0
-                return m.P_grid[t] >= -M * m.binary_Pgrid[t]
-            #m.no_grid_import_if_curt = Constraint(m.T, rule=no_grid_import_if_curt)
+                if d.price_DA[t] >= 0:
+                    return m.P_grid[t] >= -M * m.binary_Pgrid[t]
+                return Constraint.Skip
+            m.no_grid_import_if_curt = Constraint(m.T, rule=no_grid_import_if_curt)
 
             def no_curt_if_grid_import(m, t):
                 # P_curt <= M * (1 - import_flag)  →  if flag=1, P_curt = 0
-                return m.P_curt[t] <= M * (1 - m.binary_Pgrid[t])
-            #m.no_curt_if_grid_import = Constraint(m.T, rule=no_curt_if_grid_import)
+                if d.price_DA[t] >= 0:
+                    return m.P_curt[t] <= M * (1 - m.binary_Pgrid[t])
+                return Constraint.Skip
+            m.no_curt_if_grid_import = Constraint(m.T, rule=no_curt_if_grid_import)
 
-        #No import P_DA and curtailment at the same time in DA
-        # def no_curt_and_import_DA(m, t):
-        #     if d.is_DA:
-        #         if m.P_DA[t] < 0:
-        #             return m.P_DA[t] * m.P_curt[t] == 0
-        #         else:
-        #             return Constraint.Skip  # No import, so no conflict with curtailment
-        #     else:
-        #         return Constraint.Skip
-        # m.no_curt_import_DA = Constraint(m.T, rule=no_curt_and_import_DA)
 
         def deficit_rule(m, t):
             return m.deficit[t] >= (
@@ -502,8 +504,8 @@ class ElectrolyzerModel:
                     #+ m.DA_export[t] * d.price_DA[t] * dt / 1000
                     # DA revenue on fixed P_grid
                     # imbalance on deviation between actual export s(P_DA) and P_grid
-                    - (m.dev_pos[t] + m.dev_neg[t]) * penalty * dt / 1000 #* penalty * dt / 1000
-                    #+(m.P_grid[t] - m.DA_export[t]) * m.price_imb[t] * dt / 1000
+                    #- (m.dev_pos[t] + m.dev_neg[t]) * penalty * dt / 1000 #* penalty * dt / 1000
+                    +(m.P_grid[t] - m.DA_export[t]) * m.price_imb[t] * dt / 1000
                 for t in m.T
                 ) + sum(
                     m.r_FCR_block[i] * d.price_FCR[i] * dt_FCR
