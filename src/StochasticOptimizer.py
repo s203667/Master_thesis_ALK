@@ -103,9 +103,11 @@ class StochasticElectrolyzerModel:
         d = self.data
 
         # ---- STAGE 1: scenario-independent ----
-        m.P_DA        = Var(m.T, bounds=(-d.grid_cap, None))
+        m.P_DA        = Var(m.T, bounds=(-d.P_min, None))
         m.r_FCR_block = Var(m.I, domain=NonNegativeReals)
         m.z_FCR       = Var(m.I, domain=Binary)
+        m.z_on_commit = Var(m.I, domain=Binary)
+
 
         # ---- STAGE 2: scenario-indexed ----
         # Electrolyzer state
@@ -120,8 +122,8 @@ class StochasticElectrolyzerModel:
         m.P_sb  = Var(m.SC, m.T, domain=NonNegativeReals)
 
         # Power flows
-        m.P_grid  = Var(m.SC, m.T, domain=NonNegativeReals)
-        m.P_buy   = Var(m.SC, m.T, domain=NonNegativeReals)
+        m.P_grid  = Var(m.SC, m.T, bounds=(-d.grid_cap, None))
+        #m.P_buy   = Var(m.SC, m.T, domain=NonNegativeReals)
         m.P_curt  = Var(m.SC, m.T, domain=NonNegativeReals)
 
         # Hydrogen
@@ -200,13 +202,13 @@ class StochasticElectrolyzerModel:
             return m.P_sb[sc,t] == d.P_sb * m.z_sb[sc,t]
         m.standby_power = Constraint(m.SC, m.T, rule=standby_power_rule)
 
-        # --- Capacity with FCR headroom (COUPLING: r_FCR_block is Stage 1) ---
+        #--- Capacity with FCR headroom (COUPLING: r_FCR_block is Stage 1) ---
         def max_cap_rule(m, sc, t):
             return (
                 sum(m.P_seg[sc,t,s] for s in m.SEG)
                 + m.P_sb[sc,t]
                 + m.r_FCR_block[i_of_t(t)]
-                <= d.P_max * (m.z_on[sc,t] + m.z_sb[sc,t])
+                <= d.P_max * m.z_on[sc,t]
             )
         m.max_cap = Constraint(m.SC, m.T, rule=max_cap_rule)
 
@@ -218,9 +220,42 @@ class StochasticElectrolyzerModel:
             )
         m.min_load = Constraint(m.SC, m.T, rule=min_load_rule)
 
+        # ALPHA = 0.8   # fraction of scenarios that must satisfy the headroom constraint
+        #       # test: 1.0 (current), 0.9, 0.8, 0.7, 0.5
+
+        # def max_cap_rule(m, sc, t):
+        #     return (
+        #         sum(m.P_seg[sc,t,s] for s in m.SEG)
+        #         + m.P_sb[sc,t]
+        #         + m.r_FCR_block[i_of_t(t)] * m.z_on[sc,t]  # headroom only required when on
+        #         <= d.P_max * m.z_on[sc,t]
+        #     )
+        # m.max_cap = Constraint(m.SC, m.T, rule=max_cap_rule)
+
+        # def min_load_rule(m, sc, t):
+        #     return (
+        #         sum(m.P_seg[sc,t,s] for s in m.SEG)
+        #         - m.r_FCR_block[i_of_t(t)] * m.z_on[sc,t]  # only subtract when on
+        #         >= d.P_min * m.z_on[sc,t]
+        #     )
+        # m.min_load = Constraint(m.SC, m.T, rule=min_load_rule)
+
+        # # Add chance constraint: electrolyzer must be on in at least ALPHA fraction
+        # # of scenarios for each timestep in a committed FCR block
+        # def fcr_chance_rule(m, i, t_offset):
+        #     t = i * 16 + t_offset
+        #     if t >= d.T:
+        #         return Constraint.Skip
+        #     return (
+        #         sum(m.z_on[sc, t] for sc in m.SC)
+        #         >= ALPHA * d.N_sc * m.z_FCR[i]
+        #     )
+        # m.T_offset = RangeSet(0, 15)
+        # m.fcr_chance = Constraint(m.I, m.T_offset, rule=fcr_chance_rule)
+
         # --- Ramping ---
         def ramp_up_rule(m, sc, t):
-            dR = 100000
+            dR = 0.95*d.P_max
             if t == 0:
                 return sum(m.P_seg[sc,0,s] for s in m.SEG) - d.P_prev <= dR
             return (
@@ -231,7 +266,7 @@ class StochasticElectrolyzerModel:
         m.ramp_up = Constraint(m.SC, m.T, rule=ramp_up_rule)
 
         def ramp_down_rule(m, sc, t):
-            dR = 100000
+            dR = 0.95*d.P_max
             if t == 0:
                 return d.P_prev - sum(m.P_seg[sc,0,s] for s in m.SEG) <= dR
             return (
@@ -246,7 +281,7 @@ class StochasticElectrolyzerModel:
         # P_DA (Stage 1) appears here via imbalance only — not in balance
         def wind_balance_rule(m, sc, t):
             return (
-                m.wind_sc[sc,t] + m.P_buy[sc,t]
+                m.wind_sc[sc,t] #+ m.P_buy[sc,t]
                 == sum(m.P_seg[sc,t,s] for s in m.SEG)
                 + m.P_sb[sc,t]
                 + m.P_curt[sc,t]
@@ -254,13 +289,13 @@ class StochasticElectrolyzerModel:
             )
         m.wind_balance = Constraint(m.SC, m.T, rule=wind_balance_rule)
 
-        def buy_limit_rule(m, sc, t):
-            return m.P_buy[sc,t] <= d.grid_cap
-        m.buy_limit = Constraint(m.SC, m.T, rule=buy_limit_rule)
+        # def buy_limit_rule(m, sc, t):
+        #     return m.P_buy[sc,t] <= d.grid_cap
+        # m.buy_limit = Constraint(m.SC, m.T, rule=buy_limit_rule)
 
-        def buy_use_rule(m, sc, t):
-            return m.P_buy[sc,t] <= sum(m.P_seg[sc,t,s] for s in m.SEG) + m.P_sb[sc,t]
-        m.buy_use = Constraint(m.SC, m.T, rule=buy_use_rule)
+        # def buy_use_rule(m, sc, t):
+        #     return m.P_buy[sc,t] <= sum(m.P_seg[sc,t,s] for s in m.SEG)
+        # m.buy_use = Constraint(m.SC, m.T, rule=buy_use_rule)
 
         # --- Imbalance deviation (COUPLING: P_DA is Stage 1) ---
         def dev_pos_rule(m, sc, t):
@@ -283,19 +318,21 @@ class StochasticElectrolyzerModel:
         dt = 0.25
 
         def storage_rule(m, sc, t):
-
+     #Could be change with an average for the initial storage instead of enforcing for every scenario 
             if t == 0:
-                return m.storage[sc,t] == d.storage_initial + (m.h[sc,t] - m.h_sell[sc,t]) * dt
+                return m.storage[sc, t] == d.storage_initial + (m.h[sc,t] - m.h_sell[sc,t]) * dt #return m.storage[sc,t] == m.storage[sc, T_last] + (m.h[sc,t] - m.h_sell[sc,t]) * dt
             return m.storage[sc,t] == m.storage[sc,t-1] + (m.h[sc,t] - m.h_sell[sc,t]) * dt
         m.storage_dyn = Constraint(m.SC, m.T, rule=storage_rule)
 
+        
+   
         def storage_bound_rule(m, sc, t):
             return m.storage[sc,t] <= d.storage_max
         m.storage_bound = Constraint(m.SC, m.T, rule=storage_bound_rule)
 
         def h_sell_limit_rule(m, sc, t):
             if t == 0:
-                return m.h_sell[sc,t]*dt <= m.h[sc,t]*dt + d.storage_initial
+                return m.h_sell[sc,t]*dt <= m.h[sc,t]*dt + m.storage[sc, T_last]
             return m.h_sell[sc,t]*dt <= m.h[sc,t]*dt + m.storage[sc,t-1]
         m.h_sell_limit = Constraint(m.SC, m.T, rule=h_sell_limit_rule)
 
@@ -308,15 +345,37 @@ class StochasticElectrolyzerModel:
         m.min_daily_h2 = Constraint(m.SC, rule=min_daily_h2_rule)
 
         # --- FCR on-block (only participate when electrolyzer is on) ---
-        def fcr_on_block_rule(m, i):
-            # Check against scenario 0 as representative
-            # (all scenarios share the same FCR commitment)
-            t = i * 16
+        # def fcr_on_block_rule(m, i, sc):
+        #     t = i * 16
+        #     if t >= d.T:
+        #         return Constraint.Skip
+        #     return m.z_FCR[i] <= m.z_on[sc, t]
+        # m.fcr_on_block = Constraint(m.I, m.SC, rule=fcr_on_block_rule)
+
+
+        # 
+        # def fcr_on_block_rule(m, i, sc, t_offset):
+        #     t = i * 16 + t_offset
+        #     if t >= d.T:
+        #         return Constraint.Skip
+        #     return m.z_FCR[i] <= m.z_on[sc, t]
+
+        m.T_offset = RangeSet(0, 15)
+        # m.fcr_on_block = Constraint(m.I, m.SC, m.T_offset, rule=fcr_on_block_rule)
+
+
+        # FCR requires a committed-on Stage 1 decision
+        def fcr_needs_commit_rule(m, i):
+            return m.z_FCR[i] <= m.z_on_commit[i]
+        #m.fcr_needs_commit = Constraint(m.I, rule=fcr_needs_commit_rule)
+
+        # All scenarios must honour the Stage 1 on-commitment (note: >= not <=)
+        def honour_on_commit_rule(m, i, sc, t_offset):
+            t = i * 16 + t_offset
             if t >= d.T:
                 return Constraint.Skip
-            # Must be on in ALL scenarios if FCR is committed
-            return m.z_FCR[i] <= sum(m.z_on[sc, t] for sc in m.SC) / d.N_sc
-        m.fcr_on_block = Constraint(m.I, rule=fcr_on_block_rule)
+            return m.z_on[sc, t] >= m.z_on_commit[i]
+        #m.honour_on_commit = Constraint(m.I, m.SC, m.T_offset, rule=honour_on_commit_rule)
 
 
         def P_DA_upper_rule(m, t):
@@ -325,19 +384,51 @@ class StochasticElectrolyzerModel:
         def P_DA_lower_rule(m, t):
             return m.P_DA[t] >= m.wind_fc[t] - d.P_max
 
-        m.P_DA_upper = Constraint(m.T, rule=P_DA_upper_rule)
-        m.P_DA_lower = Constraint(m.T, rule=P_DA_lower_rule)
+        def P_DA_exp_link(m, t):
+            expected_grid = sum(
+             m.prob[sc] * m.P_grid[sc, t] for sc in m.SC
+            )
+            return m.P_DA[t] == expected_grid
+        m.P_DA_link = Constraint(m.T, rule=P_DA_exp_link)
 
-        m.buy_or_curt = Var(m.SC, m.T, domain=Binary)
-        M = d.grid_cap + 500000
+        #m.P_DA_upper = Constraint(m.T, rule=P_DA_upper_rule)
+        #m.P_DA_lower = Constraint(m.T, rule=P_DA_lower_rule)
 
-        def no_buy_if_curt_rule(m, sc, t):
-            return m.P_buy[sc,t] <= M * m.buy_or_curt[sc,t]
-        m.no_buy_if_curt = Constraint(m.SC, m.T, rule=no_buy_if_curt_rule)
 
-        def no_curt_if_buy_rule(m, sc, t):
-            return m.P_curt[sc,t] <= M * (1 - m.buy_or_curt[sc,t])
-        m.no_curt_if_buy = Constraint(m.SC, m.T, rule=no_curt_if_buy_rule)
+
+        # m.buy_or_curt = Var(m.SC, m.T, domain=Binary)
+        M = d.grid_cap + 50000
+
+        # def no_buy_if_curt_rule(m, sc, t):
+        #     return m.P_buy[sc,t] <= M * m.buy_or_curt[sc,t]
+        # m.no_buy_if_curt = Constraint(m.SC, m.T, rule=no_buy_if_curt_rule)
+
+        # def no_curt_if_buy_rule(m, sc, t):
+        #     return m.P_curt[sc,t] <= M * (1 - m.buy_or_curt[sc,t])
+        # m.no_curt_if_buy = Constraint(m.SC, m.T, rule=no_curt_if_buy_rule)
+
+        #Curtailment will be 0 in all scenarios if P_DA is negative:
+
+        m.import_flag = Var(m.SC, m.T, domain=Binary)
+
+        def no_import_if_curt(m, sc, t):
+            return m.P_DA[t] >= -M * m.import_flag[sc, t]
+        #m.no_import_if_curt = Constraint(m.SC, m.T, rule=no_import_if_curt)
+
+        def no_curt_if_import(m, sc, t):
+            return m.P_curt[sc, t] <= M * (1 - m.import_flag[sc, t])
+        #m.no_curt_if_import = Constraint(m.SC, m.T, rule=no_curt_if_import)
+
+        # m.binary = Var(m.SC, m.T, domain = Binary)
+        # #No buy if export
+        # def no_rt_imp_if_exp(m, sc, t):
+        #     return m.P_grid[sc,t] <= M * m.binary [sc, t]
+        # m.no_imp_if_exp = Constraint(m.SC, m.T, rule = no_rt_imp_if_exp)
+
+        # def no_rt_exp_if_imp(m, sc, t):
+        #     return m.P_buy[sc,t] <= M * (1- m.binary [sc, t])
+        # m.no_exp_if_imp = Constraint(m.SC, m.T, rule = no_rt_exp_if_imp)
+        
     # ------------------------------------------------------------------
     # OBJECTIVE
     # ------------------------------------------------------------------
@@ -347,6 +438,7 @@ class StochasticElectrolyzerModel:
         d = self.data
         dt      = 0.25
         dt_FCR  = 4
+        penalty = 73.2
 
         def obj_rule(m):
             # Stage 1: certain FCR revenue
@@ -359,17 +451,17 @@ class StochasticElectrolyzerModel:
             expected_Q = sum(
                 m.prob[sc] * (
                     # (ii) DA export revenue at realized price
-                    sum(m.P_DA[t] * m.price_sc[sc,t] * dt
+                    sum(m.P_DA[t] * m.price_sc[sc,t] * dt / 1000
                         for t in m.T)
 
 
                     # (iii) Imbalance settlement
-                    # + sum((m.dev_pos[sc,t] - m.dev_neg[sc,t])
-                    #       * m.imb_sc[sc,t] * dt / 1000
-                    #       for t in m.T)
+                     #- sum((m.dev_pos[sc,t] + m.dev_neg[sc,t])
+                     #      *penalty * dt / 1000
+                     #      for t in m.T)
                     # Imbalance settlement — signed, matches RT formulation exactly
                     + sum(
-                        (m.P_grid[sc,t] - m.P_DA[t]) * m.imb_sc[sc,t] * dt 
+                        (m.P_grid[sc,t] - m.P_DA[t]) * m.imb_sc[sc,t] * dt / 1000 
                         for t in m.T
                     )
 
@@ -377,8 +469,8 @@ class StochasticElectrolyzerModel:
                     + sum(m.h_sell[sc,t] * m.price_H2[t] * dt
                           for t in m.T)
                     # (v) Grid purchase cost
-                    - sum(m.P_buy[sc,t] * m.price_sc[sc,t] * dt 
-                          for t in m.T)
+                    #- sum(m.P_buy[sc,t] * m.price_sc[sc,t] * dt / 1000
+                    #      for t in m.T)
                 )
                 for sc in m.SC
             )
@@ -429,10 +521,10 @@ class StochasticElectrolyzerModel:
             sum(value(m.z_on[sc,t]) for sc in m.SC) / d.N_sc
             for t in m.T
         ])
-        self.results.P_buy = np.array([
-            sum(value(m.P_buy[sc,t]) for sc in m.SC) / d.N_sc
-            for t in m.T
-        ])
+        #self.results.P_buy = np.array([
+        #    sum(value(m.P_buy[sc,t]) for sc in m.SC) / d.N_sc
+        #    for t in m.T
+        #])
         
         # Per-scenario results if needed for deeper analysis
         self.results.h_sell_sc = {

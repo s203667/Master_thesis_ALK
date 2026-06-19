@@ -116,7 +116,7 @@ class DataPreparationCSV:
         )
 
         rated_kw      = df_pc['pwr'].max()     # 8000 kW
-        farm_capacity = 208_000.0              # kW
+        farm_capacity = 216_000.0              # kW
         n_turbines    = farm_capacity / rated_kw   # 26
 
         # --- 2. Offshore loss factors ---

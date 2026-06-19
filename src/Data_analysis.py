@@ -31,7 +31,6 @@ print("Data prepared.")
 negative_prices_count = (el_price_df['el_price[EUR/MWh]'] < 0).sum()
 print(f"Number of timesteps with negative prices: {negative_prices_count}")
 
-
 # =============================================================
 # LOAD ECMWF WIND DATA WITH POWER CURVE + LOSSES
 # (independent of DataPreparationCSV for analysis flexibility)
@@ -44,7 +43,7 @@ AVAILABILITY_LOSS = 0.05
 ELECTRICAL_LOSS   = 0.015
 LOSS_FACTOR = (1 - WAKE_LOSS) * (1 - AVAILABILITY_LOSS) * (1 - ELECTRICAL_LOSS)
 
-FARM_CAPACITY_KW = 208_000.0   # kW
+FARM_CAPACITY_KW = 216_000.0   # kW
 TURBINE_RATED_KW = 8_000.0     # kW
 N_TURBINES       = FARM_CAPACITY_KW / TURBINE_RATED_KW   # 26
 

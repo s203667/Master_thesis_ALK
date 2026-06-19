@@ -103,9 +103,9 @@ class ElectrolyzerModel:
         m.z_sb = Var(m.T, domain=Binary)
         m.z_off = Var(m.T, domain=Binary)
 
-        m.P_buy = Var(m.T, domain=NonNegativeReals)
+        #m.P_buy = Var(m.T, domain=NonNegativeReals)
         if d.is_DA:
-            m.P_DA = Var(m.T, bounds=(-d.grid_cap, None))
+            m.P_DA = Var(m.T, bounds=(0, None))
         else:
             m.P_grid = Var(m.T, bounds=(0, None))
         m.dev = Var(m.T, domain=NonNegativeReals)
@@ -260,7 +260,7 @@ class ElectrolyzerModel:
         dt = 0.25
         def storage_rule(m, t):
             if t == 0:
-                return m.storage[t] == m.storage[T_last]+ (m.h[t] - m.h_sell[t]) * dt  # Consider this
+                return m.storage[t] == d.storage_initial+ (m.h[t] - m.h_sell[t]) * dt  # Consider this
             return m.storage[t] == m.storage[t-1] + (m.h[t] - m.h_sell[t]) * dt
         m.storage_dyn = Constraint(m.T, rule=storage_rule)
 
@@ -272,7 +272,7 @@ class ElectrolyzerModel:
         def h_sell_prod_limit(m, t): 
             dt = 0.25
             if t == 0:
-                return m.h_sell[t]*dt <= m.h[t]*dt + m.storage[T_last]
+                return m.h_sell[t]*dt <= m.h[t]*dt + d.storage_initial
             return m.h_sell[t]*dt <= m.h[t]*dt + m.storage[t-1]  # Can only sell what is produced plus what's in storage
         m.h_sell_prod_limit = Constraint(m.T, rule=h_sell_prod_limit)
 
@@ -294,13 +294,13 @@ class ElectrolyzerModel:
         #OVERFØRT
         if d.is_DA:
             export_var = m.P_DA
-            m.P_buy.fix(0)  # No buying in DA, only selling
+            #m.P_buy.fix(0)  # No buying in DA, only selling
         else:
             export_var = m.P_grid
 
         def wind_balance_rule(m, t):
             return (
-                m.wind[t] + m.P_buy[t]
+                m.wind[t] #+ m.P_buy[t]
                 ==
                 sum(m.P_seg[t, s] for s in m.S)
                 + m.P_sb[t]
@@ -309,27 +309,51 @@ class ElectrolyzerModel:
             )
         m.wind_balance = Constraint(m.T, rule=wind_balance_rule)
 
-        #No P_buy and P_curt at the same time
-        def no_buy_curt_rule(m, t):
-            return m.P_buy[t] * m.P_curt[t] == 0
-        m.no_buy_curt = Constraint(m.T, rule=no_buy_curt_rule)
+        m.buy_flag = Var(m.T, domain=Binary)
+        M = d.grid_cap + 200000
+
+        def no_buy_if_curt(m, t):
+            return m.P_buy[t] <= M * m.buy_flag[t]
+        #m.no_buy_if_curt = Constraint(m.T, rule=no_buy_if_curt)
+
+        def no_curt_if_buy(m, t):
+            return m.P_curt[t] <= M * (1 - m.buy_flag[t])
+        #m.no_curt_if_buy = Constraint(m.T, rule=no_curt_if_buy)
 
         if d.is_DA:
             # Binary: 1 = P_DA is non-negative (exporting), 0 = P_DA may be negative (importing)
             m.import_flag = Var(m.T, domain=Binary)
-            M = d.grid_cap+200000  # big-M, use grid capacity as the upper bound
+            M = d.grid_cap+50000  # big-M, use grid capacity as the upper bound
 
             # If import_flag = 0 → P_DA >= 0 (no import allowed)
             # If import_flag = 1 → P_curt = 0 (no curtailment allowed)
             def no_import_if_curt(m, t):
                 # P_DA >= -M * import_flag  →  if flag=0, P_DA >= 0
                 return m.P_DA[t] >= -M * m.import_flag[t]
-            m.no_import_if_curt = Constraint(m.T, rule=no_import_if_curt)
+            #m.no_import_if_curt = Constraint(m.T, rule=no_import_if_curt)
 
             def no_curt_if_import(m, t):
                 # P_curt <= M * (1 - import_flag)  →  if flag=1, P_curt = 0
                 return m.P_curt[t] <= M * (1 - m.import_flag[t])
-            m.no_curt_if_import = Constraint(m.T, rule=no_curt_if_import)
+            #m.no_curt_if_import = Constraint(m.T, rule=no_curt_if_import)
+
+        if not d.is_DA:
+            # Binary: 1 = P_DA is non-negative (exporting), 0 = P_DA may be negative (importing)
+            m.binary_Pgrid = Var(m.T, domain=Binary)
+            M = d.grid_cap+50000  # big-M, use grid capacity as the upper bound
+
+            # If import_flag = 0 → P_DA >= 0 (no import allowed)
+            # If import_flag = 1 → P_curt = 0 (no curtailment allowed)
+            def no_grid_import_if_curt(m, t):
+                # P_DA >= -M * import_flag  →  if flag=0, P_DA >= 0
+                return m.P_grid[t] >= -M * m.binary_Pgrid[t]
+            #m.no_grid_import_if_curt = Constraint(m.T, rule=no_grid_import_if_curt)
+
+            def no_curt_if_grid_import(m, t):
+                # P_curt <= M * (1 - import_flag)  →  if flag=1, P_curt = 0
+                return m.P_curt[t] <= M * (1 - m.binary_Pgrid[t])
+            #m.no_curt_if_grid_import = Constraint(m.T, rule=no_curt_if_grid_import)
+
         #No import P_DA and curtailment at the same time in DA
         # def no_curt_and_import_DA(m, t):
         #     if d.is_DA:
@@ -347,19 +371,19 @@ class ElectrolyzerModel:
                 + m.P_sb[t]
                 - m.wind[t]
             )
-        m.deficit_con = Constraint(m.T, rule=deficit_rule)
+        #m.deficit_con = Constraint(m.T, rule=deficit_rule)
 
         def buy_limit_deficit_rule(m, t):
             return m.P_buy[t] <= m.deficit[t]
-        m.buy_limit_deficit = Constraint(m.T, rule=buy_limit_deficit_rule)
+        #m.buy_limit_deficit = Constraint(m.T, rule=buy_limit_deficit_rule)
 
         def buy_limit_grid_rule(m, t):
             return m.P_buy[t] <= d.grid_cap
-        m.buy_limit_grid = Constraint(m.T, rule=buy_limit_grid_rule)
+        #m.buy_limit_grid = Constraint(m.T, rule=buy_limit_grid_rule)
 
         def buy_use_limit(m, t):
-            return m.P_buy[t] <= sum(m.P_seg[t, s] for s in m.S) + m.P_sb[t]
-        m.buy_use_limit = Constraint(m.T, rule=buy_use_limit)
+            return m.P_buy[t] <= sum(m.P_seg[t, s] for s in m.S)
+       # m.buy_use_limit = Constraint(m.T, rule=buy_use_limit)
 
         if d.is_DA:
             #OVERFØRT
@@ -391,7 +415,7 @@ class ElectrolyzerModel:
         # ramping consraints
         #OVERFØRT
         def ramp_up_rule(m, t):
-            dR_up = 100000 # kW/15Min #PLACEHOLDER
+            dR_up = d.P_max*0.95 # kW/15Min #PLACEHOLDER
             if t == 0:
                 return (
                     sum(m.P_seg[0, s] for s in m.S)
@@ -406,7 +430,7 @@ class ElectrolyzerModel:
         m.ramp_up = Constraint(m.T, rule=ramp_up_rule)
 
         def ramp_down_rule(m, t):
-            dR_down = 100000 # kW/15min #PLACEHOLDER
+            dR_down = d.P_max*0.95 # kW/15min #PLACEHOLDER
             if t == 0:
                 return (
                     d.P_prev
@@ -435,6 +459,16 @@ class ElectrolyzerModel:
                 return m.dev_neg[t] >= m.DA_export[t] - m.P_grid[t]
             m.dev_neg_con = Constraint(m.T, rule=dev_neg_rule)
 
+        # if not d.is_DA:
+        #     M_val = d.P_max + 100000
+        #     m.binary = Var(m.T, domain = Binary)
+        #     def no_buy_if_export(m, t):
+        #         return m.P_buy[t] <= M_val * m.binary[t]
+        #     m.no_buy_if_export = Constraint(m.T, rule=no_buy_if_export)
+
+        #     def no_export_if_buy(m, t):
+        #         return m.P_grid[t] <= M_val * (1 - m.binary[t])
+        #     m.no_export_if_buy = Constraint(m.T, rule=no_export_if_buy)
 
         #Rolling horizon constraints:
         def initial_on_rule(m):
@@ -446,7 +480,7 @@ class ElectrolyzerModel:
         d = self.data
         dt = 0.25
         dt_FCR = 4
-        penalty = 83
+        penalty = 73.2
 
         if d.is_DA:
             # DAY-AHEAD: forecast-based, no imbalance
@@ -464,13 +498,13 @@ class ElectrolyzerModel:
             def obj_rule(m):
                 return sum(
                     m.h_sell[t] * d.price_H2[t] * dt
-                    - m.P_buy[t] * d.price_DA[t] * dt / 1000
+                    #- m.P_buy[t] * d.price_DA[t] * dt / 1000
                     #+ m.DA_export[t] * d.price_DA[t] * dt / 1000
                     # DA revenue on fixed P_grid
                     # imbalance on deviation between actual export s(P_DA) and P_grid
-                    #- (m.dev_pos[t] + m.dev_neg[t]) * penalty * dt / 1000
-                    +(m.P_grid[t] - m.DA_export[t]) * m.price_imb[t] * dt / 1000
-                        for t in m.T
+                    - (m.dev_pos[t] + m.dev_neg[t]) * penalty * dt / 1000 #* penalty * dt / 1000
+                    #+(m.P_grid[t] - m.DA_export[t]) * m.price_imb[t] * dt / 1000
+                for t in m.T
                 ) + sum(
                     m.r_FCR_block[i] * d.price_FCR[i] * dt_FCR
                     for i in m.I
@@ -529,7 +563,7 @@ class ElectrolyzerModel:
         self.results.z_on = [value(m.z_on[t]) for t in m.T]  # On/off status
         self.results.z_sb = [value(m.z_sb[t]) for t in m.T]  # Standby status
         self.results.z_off = [value(m.z_off[t]) for t in m.T]  # Off status
-        self.results.P_buy = [value(m.P_buy[t]) for t in m.T]  # Electricity bought
+        #self.results.P_buy = [value(m.P_buy[t]) for t in m.T]  # Electricity bought
         self.results.P_curt = [value(m.P_curt[t]) for t in m.T]  # Curtailed power
         self.results.r_FCR_block = [value(m.r_FCR_block[i]) for i in m.I]  # FCR block power
         self.results.h_sell = [value(m.h_sell[t]) for t in m.T]  # Hydrogen sold
