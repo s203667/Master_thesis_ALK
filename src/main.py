@@ -42,7 +42,7 @@ from StochasticOptimizer import StochasticInputData, StochasticElectrolyzerModel
 
 # --- Use ERA5 + power curve instead ---
 prep = DataPreparationCSV(
-    start_date="2025-03-05",
+    start_date="2025-10-07",
     end_date="2025-12-30",
     el_price_file_name="DayAheadPrices.csv",
     wind_file_name="windspeeds.csv",   # ← ERA5 file
