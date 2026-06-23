@@ -104,7 +104,7 @@ class StochasticElectrolyzerModel:
         d = self.data
 
         # ---- STAGE 1: scenario-independent ----
-        m.P_DA        = Var(m.T, bounds=(-d.P_min, None))
+        m.P_DA        = Var(m.T, bounds=(-d.P_max, None))
         m.r_FCR_block = Var(m.I, domain=NonNegativeReals)
         m.z_FCR       = Var(m.I, domain=Binary)
         m.z_on_commit = Var(m.I, domain=Binary)
@@ -123,7 +123,7 @@ class StochasticElectrolyzerModel:
         m.P_sb  = Var(m.SC, m.T, domain=NonNegativeReals)
 
         # Power flows
-        m.P_grid  = Var(m.SC, m.T, bounds=(-d.grid_cap, None))
+        m.P_grid  = Var(m.SC, m.T, bounds=(-d.P_max, None))
         #m.P_buy   = Var(m.SC, m.T, domain=NonNegativeReals)
         m.P_curt  = Var(m.SC, m.T, domain=NonNegativeReals)
 
@@ -322,7 +322,7 @@ class StochasticElectrolyzerModel:
             )
         m.h2_prod = Constraint(m.SC, m.T, rule=h2_rule)
 
-        T_last = d.T - 1
+        #T_last = d.T - 1
         dt = 0.25
 
         def storage_rule(m, sc, t):
@@ -340,7 +340,7 @@ class StochasticElectrolyzerModel:
 
         def h_sell_limit_rule(m, sc, t):
             if t == 0:
-                return m.h_sell[sc,t]*dt <= m.h[sc,t]*dt + m.storage[sc, T_last]
+                return m.h_sell[sc,t]*dt <= m.h[sc,t]*dt + d.storage_initial
             return m.h_sell[sc,t]*dt <= m.h[sc,t]*dt + m.storage[sc,t-1]
         m.h_sell_limit = Constraint(m.SC, m.T, rule=h_sell_limit_rule)
 
@@ -446,7 +446,7 @@ class StochasticElectrolyzerModel:
         d = self.data
         dt      = 0.25
         dt_FCR  = 4
-        penalty = 73.2
+        penalty = 111.5
 
         def obj_rule(m):
             # Stage 1: certain FCR revenue
@@ -464,13 +464,13 @@ class StochasticElectrolyzerModel:
 
 
                     # (iii) Imbalance settlement
-                     #- sum((m.dev_pos[sc,t] + m.dev_neg[sc,t])
-                     #      *penalty * dt / 1000
-                     #      for t in m.T)
+                    #- sum((m.dev_pos[sc,t] + m.dev_neg[sc,t])
+                    #      *penalty * dt / 1000
+                    #       for t in m.T)
                     # Imbalance settlement — signed, matches RT formulation exactly
                     + sum(
-                        (m.P_grid[sc,t] - m.P_DA[t]) * m.imb_sc[sc,t] * dt / 1000 
-                        for t in m.T
+                       (m.P_grid[sc,t] - m.P_DA[t]) * m.imb_sc[sc,t] * dt / 1000 
+                          for t in m.T
                     )
 
                     # (iv) Hydrogen revenue
@@ -494,7 +494,14 @@ class StochasticElectrolyzerModel:
     def run(self):
         from pyomo.opt import SolverFactory
         solver = SolverFactory('gurobi')
-        result = solver.solve(self.model, tee=False)
+        result = solver.solve(
+        self.model,
+        tee=False,
+        options={
+            "TimeLimit": 400,    # max 2 minutes per day — adjust as needed
+            "MIPGap":   0.002,   # stop at 0.5% from optimal instead of 0.01%
+        }
+    )
         if result.solver.termination_condition != TerminationCondition.optimal:
             print("WARNING: Solver did not find optimal solution:",
                   result.solver.termination_condition)

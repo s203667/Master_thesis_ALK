@@ -16,11 +16,11 @@ import pickle
 
 
 
-USE_STOCHASTIC = False
+USE_STOCHASTIC = True
 N_SCENARIOS    = 20
-N_NEIGHBORS    = 50
+N_NEIGHBORS    = 200 #not used for "random" mode. 
 
-from Scenario_gen import compute_forecast_errors, generate_scenarios_cached
+from Scenario_gen import compute_forecast_errors_cached, generate_scenarios
 from StochasticOptimizer import StochasticInputData, StochasticElectrolyzerModel
 
 
@@ -36,10 +36,31 @@ from StochasticOptimizer import StochasticInputData, StochasticElectrolyzerModel
 #     wind_source="scada",               # ← switch here
 # )
 
+prep_full = DataPreparationCSV(
+    start_date="2025-03-05",
+    end_date="2026-03-05",
+    el_price_file_name="DayAheadPrices.csv",
+    wind_file_name="windspeeds.csv",   # ← ERA5 file
+    fcr_file_name="FcrDK1.csv",
+    imbalance_file_name="ImbalancePrice.csv",
+    wind_source="era5",                # ← switch here
+    wtg_file_name="Vestas_V164_8MW.wtg",
+)   
+data_full = prep_full.data
+
+price_errors, wind_errors, imb_errors, wind_forecasts = compute_forecast_errors_cached(
+    data_full['el_price']['el_price[EUR/MWh]'].values,
+    data_full['wind']['wind_kW'].values,
+    data_full['imbalance']['ImbalancePriceEUR'].values,
+    cache_file="forecast_errors_fullyear.npz",  # saved once, reused forever
+)
+print(f"Error pool size: {len(price_errors)} days")  # should be ~330
+
+
 # --- Use ERA5 + power curve instead ---
 prep = DataPreparationCSV(
-    start_date="2025-04-01",
-    end_date="2026-03-05",
+    start_date="2025-04-08",
+    end_date="2026-03-15",
     el_price_file_name="DayAheadPrices.csv",
     wind_file_name="windspeeds.csv",   # ← ERA5 file
     fcr_file_name="FcrDK1.csv",
@@ -123,9 +144,9 @@ grid_cap = P_max  # Max grid power [kW], adjust as needed
 lag = 96  # 1 day
 
 # --- Compute historical forecast errors (once, before day loop) ---
-price_errors, wind_errors, imb_errors, wind_forecasts = compute_forecast_errors(
-    price_real, wind_real, imbalance_price, lag=96
-)
+# price_errors, wind_errors, imb_errors, wind_forecasts = compute_forecast_errors_cached(
+#     price_real, wind_real, imbalance_price
+# )
 
  #FCR is daily blocks, not per timestep
 
@@ -163,7 +184,7 @@ z_off_state = 0
 P_prev = 0
 
 TIMESTEPS_PER_DAY = 96
-num_days =  14#len(wind_real) // TIMESTEPS_PER_DAY
+num_days =  7#len(wind_real) // TIMESTEPS_PER_DAY
 
 blocks_per_day = TIMESTEPS_PER_DAY // 16
 
@@ -172,10 +193,7 @@ results_all = []
 DA_objectives = []
 RT_objectives = []
 
-for day in range(num_days):
-
-
-    print(f"Processing day {day + 1} of {num_days}...")
+for day in range( num_days):
 
 
     start = day * TIMESTEPS_PER_DAY
@@ -200,13 +218,11 @@ for day in range(num_days):
 
     # --- 4. Build model ---
     if USE_STOCHASTIC:
-        price_sc, wind_sc, imb_sc, probs = generate_scenarios_cached(
+        price_sc, wind_sc, imb_sc, probs = generate_scenarios(
             price_fc_day, wind_fc_day, imbalance_fc_day,
             price_errors, wind_errors, imb_errors, wind_forecasts,
             n_scenarios=N_SCENARIOS, n_neighbors=N_NEIGHBORS,
             mode="random",
-            day=day,
-            run_id="spring_20",
         )
         input_DA = StochasticInputData(
             T=TIMESTEPS_PER_DAY, S_seg=S, I=len(price_FCR_day),
@@ -292,130 +308,6 @@ for day in range(num_days):
             for t in DA_model.model.T
         ])
 
-    # if USE_STOCHASTIC:
-    #     print(f"\n=== DAY {day+1} FCR STAGE-1 RESULT ===")
-    #     m = DA_model.model
-    #     for i in m.I:
-    #         zfcr = value(m.z_FCR[i])
-    #         rfcr = value(m.r_FCR_block[i])
-    #         price = value(m.price_FCR[i])
-    #         vol   = DA_model.data.P_max_bid[i]
-    #         print(f"  Block {i}: z_FCR={zfcr:.0f}  r_FCR={rfcr:.1f} kW  "
-    #             f"price={price:.4f}  max_bid={vol:.1f} kW")
-            
-    #     print(f"\n=== DAY {day+1} z_on PER SCENARIO (first t of each block) ===")
-    #     for i in m.I:
-    #         t0 = i * 16
-    #         zon_by_sc = [value(m.z_on[sc, t0]) for sc in m.SC]
-    #         min_zon   = min(zon_by_sc)
-    #         n_off     = sum(1 for z in zon_by_sc if z < 0.5)
-    #         print(f"  Block {i} t={t0}: min_z_on={min_zon:.0f}  "
-    #             f"scenarios with z_on=0: {n_off}/{DA_model.data.N_sc}")
-
-    #     # Also check all 16 timesteps for the first block
-    #     print("\n  Block 0 full 16 timesteps (scenario 0 only):")
-    #     for t_off in range(16):
-    #         t = t_off
-    #         if t < DA_model.data.T:
-    #             print(f"    t={t}: z_on[0,{t}]={value(m.z_on[0, t]):.0f}"
-    #                 f"  z_sb={value(m.z_sb[0, t]):.0f}"
-    #                 f"  wind={value(m.wind_sc[0, t]):.1f} kW"
-    #                 f"  price={value(m.price_sc[0, t]):.2f}")
-                
-    #         print(f"\n=== DAY {day+1} HEADROOM CHECK (worst-case scenario) ===")
-    #         d = DA_model.data
-    #         for i in m.I:
-    #             # For each scenario, compute headroom = P_max - P_elec - P_sb
-    #             headrooms = []
-    #             for sc in m.SC:
-    #                 for t_off in range(16):
-    #                     t = i * 16 + t_off
-    #                     if t >= d.T:
-    #                         continue
-    #                     p_elec = sum(value(m.P_seg[sc, t, s]) for s in m.SEG)
-    #                     p_sb   = value(m.P_sb[sc, t])
-    #                     z_on   = value(m.z_on[sc, t])
-    #                     headroom = d.P_max * (z_on + value(m.z_sb[sc, t])) - p_elec - p_sb
-    #                     headrooms.append(headroom)
-    #             print(f"  Block {i}: min_headroom={min(headrooms):.1f} kW  "
-    #                 f"mean_headroom={sum(headrooms)/len(headrooms):.1f} kW")
-
-    #         # Check min_load slack: P_elec - r_FCR >= P_min * z_on
-    #         # With r_FCR=0, slack = P_elec - P_min*z_on
-    #         print("\n  Min-load slack with r_FCR=0 (block 1, all scenarios):")
-    #         for sc in m.SC:
-    #             slacks = []
-    #             for t_off in range(16):
-    #                 t = 16 + t_off
-    #                 if t >= d.T: continue
-    #                 p_elec = sum(value(m.P_seg[sc, t, s]) for s in m.SEG)
-    #                 z_on   = value(m.z_on[sc, t])
-    #                 slack  = p_elec - d.P_min * z_on
-    #                 slacks.append(slack)
-    #             print(f"    sc={sc}: min_slack={min(slacks):.1f} kW")
-
-    #     # Run AFTER the normal DA solve to test feasibility in isolation.
-
-    #     m2 = DA_model.model
-
-    #     # Fix block 1 to participate
-    #     m2.z_FCR[1].fix(1)
-    #     m2.r_FCR_block[1].fix(1000)   # minimum bid, kW
-
-    #     from pyomo.opt import SolverFactory
-    #     solver2 = SolverFactory('gurobi')
-    #     solver2.options['DualReductions'] = 0
-    #     res2 = solver2.solve(m2, tee=False)
-    #     print(f"\n=== FORCED FCR TEST (block 1, r=1000 kW) ===")
-    #     print(f"  Termination: {res2.solver.termination_condition}")
-    #     if str(res2.solver.termination_condition) == 'optimal':
-    #         print(f"  Objective: {value(m2.obj):.2f}")
-    #         print("  → FCR IS FEASIBLE. The issue is economic, not structural.")
-    #     else:
-    #         print("  → FCR IS INFEASIBLE. There is a hard constraint conflict.")
-    #         from pyomo.util.infeasible import log_infeasible_constraints
-    #         import logging
-    #         logging.getLogger('pyomo.core').setLevel(logging.INFO)
-    #         log_infeasible_constraints(m2, log_expression=True, tol=1e-4)
-
-    #     # Unfix so the rest of the loop continues normally
-    #     m2.z_FCR[1].unfix()
-    #     m2.r_FCR_block[1].unfix()
-
-    #     # This prints the one number that explains the gap between
-    # # stochastic and deterministic FCR participation.
-    #     print(f"\n=== STOCHASTIC vs DETERMINISTIC GAP ===")
-    #     d = DA_model.data
-    #     for i in m.I:
-    #         # What r_FCR does max_cap_rule allow, per scenario?
-    #         # r_FCR <= P_max*(z_on+z_sb) - P_elec - P_sb   for ALL sc, ALL t
-    #         # The binding scenario is the one with minimum headroom.
-    #         min_hw = float('inf')
-    #         binding_sc, binding_t = -1, -1
-    #         for sc in m.SC:
-    #             for t_off in range(16):
-    #                 t = i * 16 + t_off
-    #                 if t >= d.T: continue
-    #                 p_elec = sum(value(m.P_seg[sc, t, s]) for s in m.SEG)
-    #                 p_sb   = value(m.P_sb[sc, t])
-    #                 cap    = d.P_max * (value(m.z_on[sc,t]) + value(m.z_sb[sc,t]))
-    #                 hw     = cap - p_elec - p_sb
-    #                 if hw < min_hw:
-    #                     min_hw = hw
-    #                     binding_sc, binding_t = sc, t
-    #         print(f"  Block {i}: max feasible r_FCR (from headroom) = {min_hw:.1f} kW "
-    #             f"  ← binding sc={binding_sc}, t={binding_t}")
-    #         # Compare: what would the deterministic model see?
-    #         # (Uses wind_forecast, single 'scenario')
-    #         t0 = i * 16
-    #         print(f"           FCR min_bid = {d.P_min_bid} kW  "
-    #             f"  z_FCR_min_bid feasible: {'YES' if min_hw >= d.P_min_bid else 'NO'}")
-        # print("\n=== DAY 2 DA SUMMARY ===")
-    # print("P_DA first 10:", P_DA[:10])
-    # print("P_elec_DA first 10:", P_Elec_DA[:10])
-    # print("h_sell_DA first 10:", h_sell_DA[:10])
-    # print("storage_end_DA:", DA_model.results.storage[-1])
-    # print("z_on_end_DA:", DA_model.results.z_on[-1])
 
     # -----------------------------
     # 3. Slice REAL DATA for RT run
@@ -528,6 +420,7 @@ for day in range(num_days):
         "price_H2":    price_H2_RT,         # EUR/kg
         "price_FCR":   price_FCR_day ,       #EUR/kW
     })
+   
 
  
 
@@ -545,7 +438,7 @@ cfg = EconomicsConfig(
     opex_electrolyzer_eur_kw_yr = 150.0,      # EUR/(kW·yr)
     opex_wind_eur_kw_yr         = 00.0,      # EUR/(kW·yr)
  
-    discount_rate               = 0.05,
+    discount_rate               = 0.08,
     project_lifetime_yr         = 20,
     simulation_years            = num_days / 365.0,   # fraction of year simulated
     tax_rate                    = 0.22,
@@ -613,13 +506,25 @@ storage_full   = np.concatenate([d["storage"]   for d in results_all])
 z_on_full      = np.concatenate([d["z_on_RT"]   for d in results_all])
 DA_FCR_full    = np.concatenate([d["DA_FCR"]    for d in results_all])
 wind_real_full = np.concatenate([d["wind_real"] for d in results_all])
-wind_fc_full   = wind_forecast[:len(P_DA_full)]
+wind_fc_full = np.concatenate([d["wind_forecast"] for d in results_all])
+
+#wind_fc_full   = wind_forecast[:len(P_DA_full)]
+
 
 N = len(P_DA_full)
-price_real_full = price_real[:N]
-imb_price_full  = imbalance_price[:N]
-price_H2_full   = price_H2[:N]
-price_FCR_full  = price_FCR[:len(DA_FCR_full)]
+
+# ← Replace global array slices with results_all extractions:
+price_real_full = np.concatenate([d["price_DA"]  for d in results_all])
+imb_price_full  = np.concatenate([d["price_imb"] for d in results_all])
+price_H2_full   = np.concatenate([d["price_H2"]  for d in results_all])
+price_FCR_full  = price_FCR[:len(DA_FCR_full)] 
+
+
+# N = len(P_DA_full)
+# price_real_full = price_real[:N]
+# imb_price_full  = imbalance_price[:N]
+# price_H2_full   = price_H2[:N]
+# price_FCR_full  = price_FCR[:len(DA_FCR_full)]
 
 # --- Revenue terms ---
 rev_elec_DA  = np.sum(P_DA_full * price_real_full * dt / 1000)

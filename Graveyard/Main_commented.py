@@ -1634,3 +1634,130 @@ plot_h2_sensitivity(results_all, cfg, h2_prices=[3.0, 4.5, 6.0, 8.0],
 #     h_full = np.array(model_full.results.h)
 
 # h_roll = None
+
+
+##########FCR STOCH TEST
+    # if USE_STOCHASTIC:
+    #     print(f"\n=== DAY {day+1} FCR STAGE-1 RESULT ===")
+    #     m = DA_model.model
+    #     for i in m.I:
+    #         zfcr = value(m.z_FCR[i])
+    #         rfcr = value(m.r_FCR_block[i])
+    #         price = value(m.price_FCR[i])
+    #         vol   = DA_model.data.P_max_bid[i]
+    #         print(f"  Block {i}: z_FCR={zfcr:.0f}  r_FCR={rfcr:.1f} kW  "
+    #             f"price={price:.4f}  max_bid={vol:.1f} kW")
+            
+    #     print(f"\n=== DAY {day+1} z_on PER SCENARIO (first t of each block) ===")
+    #     for i in m.I:
+    #         t0 = i * 16
+    #         zon_by_sc = [value(m.z_on[sc, t0]) for sc in m.SC]
+    #         min_zon   = min(zon_by_sc)
+    #         n_off     = sum(1 for z in zon_by_sc if z < 0.5)
+    #         print(f"  Block {i} t={t0}: min_z_on={min_zon:.0f}  "
+    #             f"scenarios with z_on=0: {n_off}/{DA_model.data.N_sc}")
+
+    #     # Also check all 16 timesteps for the first block
+    #     print("\n  Block 0 full 16 timesteps (scenario 0 only):")
+    #     for t_off in range(16):
+    #         t = t_off
+    #         if t < DA_model.data.T:
+    #             print(f"    t={t}: z_on[0,{t}]={value(m.z_on[0, t]):.0f}"
+    #                 f"  z_sb={value(m.z_sb[0, t]):.0f}"
+    #                 f"  wind={value(m.wind_sc[0, t]):.1f} kW"
+    #                 f"  price={value(m.price_sc[0, t]):.2f}")
+                
+    #         print(f"\n=== DAY {day+1} HEADROOM CHECK (worst-case scenario) ===")
+    #         d = DA_model.data
+    #         for i in m.I:
+    #             # For each scenario, compute headroom = P_max - P_elec - P_sb
+    #             headrooms = []
+    #             for sc in m.SC:
+    #                 for t_off in range(16):
+    #                     t = i * 16 + t_off
+    #                     if t >= d.T:
+    #                         continue
+    #                     p_elec = sum(value(m.P_seg[sc, t, s]) for s in m.SEG)
+    #                     p_sb   = value(m.P_sb[sc, t])
+    #                     z_on   = value(m.z_on[sc, t])
+    #                     headroom = d.P_max * (z_on + value(m.z_sb[sc, t])) - p_elec - p_sb
+    #                     headrooms.append(headroom)
+    #             print(f"  Block {i}: min_headroom={min(headrooms):.1f} kW  "
+    #                 f"mean_headroom={sum(headrooms)/len(headrooms):.1f} kW")
+
+    #         # Check min_load slack: P_elec - r_FCR >= P_min * z_on
+    #         # With r_FCR=0, slack = P_elec - P_min*z_on
+    #         print("\n  Min-load slack with r_FCR=0 (block 1, all scenarios):")
+    #         for sc in m.SC:
+    #             slacks = []
+    #             for t_off in range(16):
+    #                 t = 16 + t_off
+    #                 if t >= d.T: continue
+    #                 p_elec = sum(value(m.P_seg[sc, t, s]) for s in m.SEG)
+    #                 z_on   = value(m.z_on[sc, t])
+    #                 slack  = p_elec - d.P_min * z_on
+    #                 slacks.append(slack)
+    #             print(f"    sc={sc}: min_slack={min(slacks):.1f} kW")
+
+    #     # Run AFTER the normal DA solve to test feasibility in isolation.
+
+    #     m2 = DA_model.model
+
+    #     # Fix block 1 to participate
+    #     m2.z_FCR[1].fix(1)
+    #     m2.r_FCR_block[1].fix(1000)   # minimum bid, kW
+
+    #     from pyomo.opt import SolverFactory
+    #     solver2 = SolverFactory('gurobi')
+    #     solver2.options['DualReductions'] = 0
+    #     res2 = solver2.solve(m2, tee=False)
+    #     print(f"\n=== FORCED FCR TEST (block 1, r=1000 kW) ===")
+    #     print(f"  Termination: {res2.solver.termination_condition}")
+    #     if str(res2.solver.termination_condition) == 'optimal':
+    #         print(f"  Objective: {value(m2.obj):.2f}")
+    #         print("  → FCR IS FEASIBLE. The issue is economic, not structural.")
+    #     else:
+    #         print("  → FCR IS INFEASIBLE. There is a hard constraint conflict.")
+    #         from pyomo.util.infeasible import log_infeasible_constraints
+    #         import logging
+    #         logging.getLogger('pyomo.core').setLevel(logging.INFO)
+    #         log_infeasible_constraints(m2, log_expression=True, tol=1e-4)
+
+    #     # Unfix so the rest of the loop continues normally
+    #     m2.z_FCR[1].unfix()
+    #     m2.r_FCR_block[1].unfix()
+
+    #     # This prints the one number that explains the gap between
+    # # stochastic and deterministic FCR participation.
+    #     print(f"\n=== STOCHASTIC vs DETERMINISTIC GAP ===")
+    #     d = DA_model.data
+    #     for i in m.I:
+    #         # What r_FCR does max_cap_rule allow, per scenario?
+    #         # r_FCR <= P_max*(z_on+z_sb) - P_elec - P_sb   for ALL sc, ALL t
+    #         # The binding scenario is the one with minimum headroom.
+    #         min_hw = float('inf')
+    #         binding_sc, binding_t = -1, -1
+    #         for sc in m.SC:
+    #             for t_off in range(16):
+    #                 t = i * 16 + t_off
+    #                 if t >= d.T: continue
+    #                 p_elec = sum(value(m.P_seg[sc, t, s]) for s in m.SEG)
+    #                 p_sb   = value(m.P_sb[sc, t])
+    #                 cap    = d.P_max * (value(m.z_on[sc,t]) + value(m.z_sb[sc,t]))
+    #                 hw     = cap - p_elec - p_sb
+    #                 if hw < min_hw:
+    #                     min_hw = hw
+    #                     binding_sc, binding_t = sc, t
+    #         print(f"  Block {i}: max feasible r_FCR (from headroom) = {min_hw:.1f} kW "
+    #             f"  ← binding sc={binding_sc}, t={binding_t}")
+    #         # Compare: what would the deterministic model see?
+    #         # (Uses wind_forecast, single 'scenario')
+    #         t0 = i * 16
+    #         print(f"           FCR min_bid = {d.P_min_bid} kW  "
+    #             f"  z_FCR_min_bid feasible: {'YES' if min_hw >= d.P_min_bid else 'NO'}")
+        # print("\n=== DAY 2 DA SUMMARY ===")
+    # print("P_DA first 10:", P_DA[:10])
+    # print("P_elec_DA first 10:", P_Elec_DA[:10])
+    # print("h_sell_DA first 10:", h_sell_DA[:10])
+    # print("storage_end_DA:", DA_model.results.storage[-1])
+    # print("z_on_end_DA:", DA_model.results.z_on[-1])

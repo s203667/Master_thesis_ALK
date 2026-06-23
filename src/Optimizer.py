@@ -482,7 +482,7 @@ class ElectrolyzerModel:
         d = self.data
         dt = 0.25
         dt_FCR = 4
-        penalty = 73.2
+        penalty = 111.43
 
         if d.is_DA:
             # DAY-AHEAD: forecast-based, no imbalance
@@ -504,7 +504,7 @@ class ElectrolyzerModel:
                     #+ m.DA_export[t] * d.price_DA[t] * dt / 1000
                     # DA revenue on fixed P_grid
                     # imbalance on deviation between actual export s(P_DA) and P_grid
-                    #- (m.dev_pos[t] + m.dev_neg[t]) * penalty * dt / 1000 #* penalty * dt / 1000
+                   #- (m.dev_pos[t] + m.dev_neg[t]) * penalty * dt / 1000 #* penalty * dt / 1000
                     +(m.P_grid[t] - m.DA_export[t]) * m.price_imb[t] * dt / 1000
                 for t in m.T
                 ) + sum(

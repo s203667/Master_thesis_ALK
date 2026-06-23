@@ -1,41 +1,36 @@
 import numpy as np
 import os
 
-
-def generate_scenarios_cached(
-    price_fc, wind_fc, imb_fc,
-    price_errors, wind_errors, imb_errors, wind_forecasts,
-    n_scenarios, n_neighbors, mode,
-    day: int,
-    cache_dir: str = "cache/scenarios",
-    run_id: str = "default",
+def compute_forecast_errors_cached(
+    price_real, wind_real, imbalance_real,
+    lag=96,
+    cache_dir="cache",
+    cache_file="forecast_errors.npz",
 ):
     """
-    Thin wrapper around generate_scenarios that saves/loads from .npz cache.
-    
-    run_id:   change this string to invalidate the cache and generate fresh
-              scenarios (e.g. run_id="seed42" or run_id="v2").
-    day:      the day index within the current run — used as the cache key.
+    Compute historical forecast errors once and cache them.
+    These come from the full dataset and never change between runs.
     """
     os.makedirs(cache_dir, exist_ok=True)
-    cache_path = os.path.join(cache_dir, f"{run_id}_day{day:03d}.npz")
+    cache_path = os.path.join(cache_dir, cache_file)
 
     if os.path.exists(cache_path):
         d = np.load(cache_path)
-        return d["price_sc"], d["wind_sc"], d["imb_sc"], d["probs"]
+        print(f"Loaded forecast errors from cache ({cache_path})")
+        return d["price_errors"], d["wind_errors"], d["imb_errors"], d["wind_forecasts"]
 
-    price_sc, wind_sc, imb_sc, probs = generate_scenarios(
-        price_fc, wind_fc, imb_fc,
-        price_errors, wind_errors, imb_errors, wind_forecasts,
-        n_scenarios=n_scenarios, n_neighbors=n_neighbors, mode=mode,
+    price_errors, wind_errors, imb_errors, wind_forecasts = compute_forecast_errors(
+        price_real, wind_real, imbalance_real, lag=lag
     )
 
     np.savez(cache_path,
-             price_sc=price_sc, wind_sc=wind_sc,
-             imb_sc=imb_sc,     probs=probs)
+             price_errors=price_errors,
+             wind_errors=wind_errors,
+             imb_errors=imb_errors,
+             wind_forecasts=wind_forecasts)
+    print(f"Computed and cached forecast errors → {cache_path}")
 
-    return price_sc, wind_sc, imb_sc, probs
-
+    return price_errors, wind_errors, imb_errors, wind_forecasts
 # ─────────────────────────────────────────────────────────────────────────────
 # Forecast error computation
 # ─────────────────────────────────────────────────────────────────────────────
